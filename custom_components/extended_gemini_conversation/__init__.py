@@ -1,164 +1,209 @@
-"""The Extended Google Generative AI Conversation Integration."""
-
-
+"""Google Generative AI Conversation integration with function-calling style support."""
 from __future__ import annotations
-
-
 
 import json
 import logging
+from pathlib import Path
 from typing import Literal
 
-from openai import AsyncAzureOpenAI, AsyncOpenAI
-from openai._exceptions import AuthenticationError, OpenAIError
-from openai.types.chat.chat_completion import (
-    ChatCompletion,
-    ChatCompletionMessage,
-    Choice,
-)
-import yaml
+import voluptuous as vol
+from google import genai  # type: ignore[attr-defined]
+from google.genai.errors import APIError, ClientError
+from requests.exceptions import Timeout
 
 from homeassistant.components import conversation
-from homeassistant.components.homeassistant.exposed_entities import async_should_expose
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_NAME, CONF_API_KEY, MATCH_ALL
-from homeassistant.core import HomeAssistant
+from homeassistant.const import (
+    CONF_API_KEY,
+    Platform,
+    MATCH_ALL,
+)
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    intent,
+)
 from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
     ConfigEntryNotReady,
     HomeAssistantError,
-    TemplateError,
 )
-from homeassistant.helpers import (
-    config_validation as cv,
-    entity_registry as er,
-    intent,
-    template,
-)
-from homeassistant.helpers.httpx_client import get_async_client
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import ulid
 
-from .const import (
-    CONF_API_VERSION,
-    CONF_ATTACH_USERNAME,
-    CONF_BASE_URL,
-    CONF_CHAT_MODEL,
-    CONF_CONTEXT_THRESHOLD,
-    CONF_CONTEXT_TRUNCATE_STRATEGY,
-    CONF_FUNCTIONS,
-    CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-    CONF_MAX_TOKENS,
-    CONF_ORGANIZATION,
-    CONF_PROMPT,
-    CONF_SKIP_AUTHENTICATION,
-    CONF_TEMPERATURE,
-    CONF_TOP_P,
-    CONF_USE_TOOLS,
-    DEFAULT_ATTACH_USERNAME,
-    DEFAULT_CHAT_MODEL,
-    DEFAULT_CONF_FUNCTIONS,
-    DEFAULT_CONTEXT_THRESHOLD,
-    DEFAULT_CONTEXT_TRUNCATE_STRATEGY,
-    DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-    DEFAULT_MAX_TOKENS,
-    DEFAULT_PROMPT,
-    DEFAULT_SKIP_AUTHENTICATION,
-    DEFAULT_TEMPERATURE,
-    DEFAULT_TOP_P,
-    DEFAULT_USE_TOOLS,
-    DOMAIN,
-    EVENT_CONVERSATION_FINISHED,
-)
-from .exceptions import (
-    FunctionLoadFailed,
-    FunctionNotFound,
-    InvalidFunction,
-    ParseArgumentsFailed,
-    TokenLengthExceededError,
-)
-from .helpers import (
-    get_function_executor,
-    is_azure,
-    validate_authentication,
-)
-from .services import async_setup_services
-
 _LOGGER = logging.getLogger(__name__)
 
-CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-
-
-# hass.data key for agent.
+DOMAIN = "google_generative_ai_conversation"
 DATA_AGENT = "agent"
 
+CONF_CHAT_MODEL = "chat_model"
+CONF_PROMPT = "prompt"
+CONF_IMAGE_FILENAME = "image_filename"
+CONF_FILENAMES = "filenames"
+
+# Example: Provide your “functions” in a YAML-like or JSON-like structure
+# so you can load them at runtime. This can then be documented or 
+# stored in ConfigEntry options.
+CONF_FUNCTIONS = "functions"
+
+RECOMMENDED_CHAT_MODEL = "models/chat-bison-001"
+TIMEOUT_MILLIS = 60000
+
+# Services
+SERVICE_GENERATE_CONTENT = "generate_content"
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+PLATFORMS = (Platform.CONVERSATION,)
+
+# Example function placeholder
+def execute_example_function(hass: HomeAssistant, arguments: dict) -> str:
+    """Example function that might toggle a light, look up weather, etc."""
+    # Implementation will depend on your needs
+    return f"Executed example_function with arguments: {arguments}"
+
+def load_functions(raw_functions: str) -> list[dict]:
+    """Load function specifications from YAML or JSON in config options."""
+    # This snippet uses JSON for illustration; adjust as needed for YAML.
+    try:
+        spec_list = json.loads(raw_functions)
+    except (json.JSONDecodeError, TypeError):
+        spec_list = []
+    return spec_list
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up OpenAI Conversation."""
-    await async_setup_services(hass, config)
+    """Set up the integration (register services, etc.)."""
+
+    async def generate_content(call: ServiceCall) -> ServiceResponse:
+        """Generate content from text and optionally images using Google Generative AI."""
+        # This portion shows how you'd still handle your existing service
+        # to generate text (and potentially attach files).
+        if call.data.get(CONF_IMAGE_FILENAME):
+            # Deprecated issue example
+            async_create_issue(
+                hass,
+                DOMAIN,
+                "deprecated_image_filename_parameter",
+                breaks_in_ha_version="2025.9.0",
+                is_fixable=False,
+                severity=IssueSeverity.WARNING,
+                translation_key="deprecated_image_filename_parameter",
+            )
+
+        prompt_parts = [call.data[CONF_PROMPT]]
+
+        config_entry: ConfigEntry = hass.config_entries.async_entries(DOMAIN)[0]
+        client = config_entry.runtime_data
+
+        def append_files_to_prompt():
+            image_filenames = call.data[CONF_IMAGE_FILENAME]
+            filenames = call.data[CONF_FILENAMES]
+            for filename in set(image_filenames + filenames):
+                if not hass.config.is_allowed_path(filename):
+                    raise HomeAssistantError(
+                        f"Cannot read `{filename}`, no access to path; "
+                        "`allowlist_external_dirs` may need to be adjusted in "
+                        "`configuration.yaml`"
+                    )
+                if not Path(filename).exists():
+                    raise HomeAssistantError(f"`{filename}` does not exist")
+                prompt_parts.append(client.files.upload(file=filename))
+
+        await hass.async_add_executor_job(append_files_to_prompt)
+
+        try:
+            response = await client.aio.models.generate_content(
+                model=RECOMMENDED_CHAT_MODEL,
+                contents=prompt_parts,
+            )
+        except (APIError, ValueError) as err:
+            raise HomeAssistantError(f"Error generating content: {err}") from err
+
+        if response.prompt_feedback:
+            raise HomeAssistantError(
+                "Error generating content due to content violations, "
+                f"reason: {response.prompt_feedback.block_reason_message}"
+            )
+
+        if not response.candidates or not response.candidates[0].content.parts:
+            raise HomeAssistantError("Unknown error generating content")
+
+        return {"text": response.text}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GENERATE_CONTENT,
+        generate_content,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_PROMPT): cv.string,
+                vol.Optional(CONF_IMAGE_FILENAME, default=[]): vol.All(
+                    cv.ensure_list, [cv.string]
+                ),
+                vol.Optional(CONF_FILENAMES, default=[]): vol.All(
+                    cv.ensure_list, [cv.string]
+                ),
+            }
+        ),
+        supports_response=SupportsResponse.ONLY,
+    )
+
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up OpenAI Conversation from a config entry."""
-
+    """Set up the integration from a config entry (creates the conversation agent, etc.)."""
     try:
-        await validate_authentication(
-            hass=hass,
-            api_key=entry.data[CONF_API_KEY],
-            base_url=entry.data.get(CONF_BASE_URL),
-            api_version=entry.data.get(CONF_API_VERSION),
-            organization=entry.data.get(CONF_ORGANIZATION),
-            skip_authentication=entry.data.get(
-                CONF_SKIP_AUTHENTICATION, DEFAULT_SKIP_AUTHENTICATION
-            ),
+        client = genai.Client(api_key=entry.data[CONF_API_KEY])
+        # Validate we can connect to at least one model
+        await client.aio.models.get(
+            model=entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL),
+            config={"http_options": {"timeout": TIMEOUT_MILLIS}},
         )
-    except AuthenticationError as err:
-        _LOGGER.error("Invalid API key: %s", err)
-        return False
-    except OpenAIError as err:
-        raise ConfigEntryNotReady(err) from err
+    except (APIError, Timeout) as err:
+        if isinstance(err, ClientError) and "API_KEY_INVALID" in str(err):
+            raise ConfigEntryAuthFailed("Invalid API Key") from err
+        if isinstance(err, Timeout):
+            raise ConfigEntryNotReady("Request timed out") from err
+        raise ConfigEntryError(f"Error setting up entry: {err}") from err
 
-    agent = OpenAIAgent(hass, entry)
+    entry.runtime_data = client
 
-    data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-    data[CONF_API_KEY] = entry.data[CONF_API_KEY]
-    data[DATA_AGENT] = agent
-
+    # Create the conversation agent
+    agent = GoogleGenerativeAIAgent(hass, entry)
+    # Register the agent with the conversation component
     conversation.async_set_agent(hass, entry, agent)
+
+    # Forward the Conversation platform (so HA sets up conversation for this domain)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload OpenAI."""
-    hass.data[DOMAIN].pop(entry.entry_id)
+    """Unload the integration."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
     conversation.async_unset_agent(hass, entry)
     return True
 
 
-class OpenAIAgent(conversation.AbstractConversationAgent):
-    """OpenAI conversation agent."""
+class GoogleGenerativeAIAgent(conversation.AbstractConversationAgent):
+    """
+    A sample agent that uses Google Generative AI to manage conversation, 
+    including function-call style prompts.
+    """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the agent."""
         self.hass = hass
         self.entry = entry
+        self.client = entry.runtime_data
+        # Keep track of messages for each conversation
         self.history: dict[str, list[dict]] = {}
-        base_url = entry.data.get(CONF_BASE_URL)
-        if is_azure(base_url):
-            self.client = AsyncAzureOpenAI(
-                api_key=entry.data[CONF_API_KEY],
-                azure_endpoint=base_url,
-                api_version=entry.data.get(CONF_API_VERSION),
-                organization=entry.data.get(CONF_ORGANIZATION),
-                http_client=get_async_client(hass),
-            )
-        else:
-            self.client = AsyncOpenAI(
-                api_key=entry.data[CONF_API_KEY],
-                base_url=base_url,
-                organization=entry.data.get(CONF_ORGANIZATION),
-                http_client=get_async_client(hass),
-            )
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -168,348 +213,170 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
-        exposed_entities = self.get_exposed_entities()
+        """
+        Process a conversation request. This method is where you'll incorporate 
+        the system prompt, user message, function definitions, and detect 
+        whether the AI is requesting a function call.
+        """
 
+        # Find or create a conversation ID
         if user_input.conversation_id in self.history:
             conversation_id = user_input.conversation_id
             messages = self.history[conversation_id]
         else:
             conversation_id = ulid.ulid()
             user_input.conversation_id = conversation_id
+            system_message = self._generate_system_message()
+            messages = [system_message]
+
+        # Append the current user message
+        messages.append({"role": "user", "content": user_input.text})
+        self.history[conversation_id] = messages
+
+        # Send request to Google Generative AI
+        try:
+            response_text = await self._call_generative_ai(messages)
+        except HomeAssistantError as err:
+            _LOGGER.error("Error during generative AI call: %s", err)
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN, str(err)
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        # Examine the response to see if it is requesting a function call
+        function_call_result = await self._maybe_execute_function(response_text)
+
+        # If a function call was made, we might want to ask the model how to handle it
+        if function_call_result:
+            # The model’s response indicated a function call
+            # so we can append the function call result and re-query for a final message
+            messages.append(
+                {
+                    "role": "function",
+                    "content": function_call_result,
+                }
+            )
+            # Then call the model again with updated messages
             try:
-                system_message = self._generate_system_message(
-                    exposed_entities, user_input
-                )
-            except TemplateError as err:
-                _LOGGER.error("Error rendering prompt: %s", err)
+                response_text = await self._call_generative_ai(messages)
+            except HomeAssistantError as err:
+                _LOGGER.error("Error after function call: %s", err)
                 intent_response = intent.IntentResponse(language=user_input.language)
                 intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Sorry, I had a problem with my template: {err}",
+                    intent.IntentResponseErrorCode.UNKNOWN, str(err)
                 )
                 return conversation.ConversationResult(
                     response=intent_response, conversation_id=conversation_id
                 )
-            messages = [system_message]
-        user_message = {"role": "user", "content": user_input.text}
-        if self.entry.options.get(CONF_ATTACH_USERNAME, DEFAULT_ATTACH_USERNAME):
-            user = user_input.context.user_id
-            if user is not None:
-                user_message[ATTR_NAME] = user
 
-        messages.append(user_message)
+        # Record the final AI message
+        messages.append({"role": "assistant", "content": response_text})
 
-        try:
-            query_response = await self.query(user_input, messages, exposed_entities, 0)
-        except OpenAIError as err:
-            _LOGGER.error(err)
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Sorry, I had a problem talking to OpenAI: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-        except HomeAssistantError as err:
-            _LOGGER.error(err, exc_info=err)
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-
-        messages.append(query_response.message.model_dump(exclude_none=True))
-        self.history[conversation_id] = messages
-
-        self.hass.bus.async_fire(
-            EVENT_CONVERSATION_FINISHED,
-            {
-                "response": query_response.response.model_dump(),
-                "user_input": user_input,
-                "messages": messages,
-            },
-        )
-
+        # Prepare the final conversation response
         intent_response = intent.IntentResponse(language=user_input.language)
-        intent_response.async_set_speech(query_response.message.content)
+        intent_response.async_set_speech(response_text)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
 
-    def _generate_system_message(
-        self, exposed_entities, user_input: conversation.ConversationInput
-    ):
-        raw_prompt = self.entry.options.get(CONF_PROMPT, DEFAULT_PROMPT)
-        prompt = self._async_generate_prompt(raw_prompt, exposed_entities, user_input)
-        return {"role": "system", "content": prompt}
+    def _generate_system_message(self) -> dict:
+        """
+        Generate a system message that includes instructions and 
+        the list of functions the model may call.
+        """
+        # In the OpenAI approach, you might load the function schema. 
+        # Here, we embed it in the prompt for demonstration.
+        raw_functions = self.entry.options.get(CONF_FUNCTIONS, "[]")
+        functions_list = load_functions(raw_functions)
 
-    def _async_generate_prompt(
-        self,
-        raw_prompt: str,
-        exposed_entities,
-        user_input: conversation.ConversationInput,
-    ) -> str:
-        """Generate a prompt for the user."""
-        return template.Template(raw_prompt, self.hass).async_render(
-            {
-                "ha_name": self.hass.config.location_name,
-                "exposed_entities": exposed_entities,
-                "current_device_id": user_input.device_id,
-            },
-            parse_result=False,
+        # Provide usage instructions plus some kind of JSON format for function calls
+        # This is a sample approach; you should refine your instructions.
+        system_prompt = (
+            "You are Home Assistant's Google Generative AI Agent. "
+            "You can respond normally, or if you need to use one of the following functions, "
+            "please return ONLY valid JSON in this exact format:\n\n"
+            '{\n  "function_call": {\n    "name": "<FUNCTION_NAME>",\n    '
+            '"arguments": { "arg1": "value", ... }\n  }\n}\n\n'
+            "Here are the functions you have available:\n"
         )
 
-    def get_exposed_entities(self):
-        states = [
-            state
-            for state in self.hass.states.async_all()
-            if async_should_expose(self.hass, conversation.DOMAIN, state.entity_id)
-        ]
-        entity_registry = er.async_get(self.hass)
-        exposed_entities = []
-        for state in states:
-            entity_id = state.entity_id
-            entity = entity_registry.async_get(entity_id)
+        for func in functions_list:
+            name = func.get("name")
+            desc = func.get("description", "")
+            args = func.get("parameters", {})
+            system_prompt += f"\n- Name: {name}\n  Description: {desc}\n  Parameters: {json.dumps(args)}\n"
 
-            aliases = []
-            if entity and entity.aliases:
-                aliases = entity.aliases
+        return {"role": "system", "content": system_prompt}
 
-            exposed_entities.append(
-                {
-                    "entity_id": entity_id,
-                    "name": state.name,
-                    "state": self.hass.states.get(entity_id).state,
-                    "aliases": aliases,
-                }
-            )
-        return exposed_entities
+    async def _call_generative_ai(self, messages: list[dict]) -> str:
+        """
+        Convert the messages into a single text prompt and call the 
+        Google Generative AI API. 
+        """
+        # Flatten the conversation into text. You can refine for better context.
+        conversation_text = ""
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            conversation_text += f"{role.upper()}:\n{content}\n\n"
 
-    def get_functions(self):
-        try:
-            function = self.entry.options.get(CONF_FUNCTIONS)
-            result = yaml.safe_load(function) if function else DEFAULT_CONF_FUNCTIONS
-            if result:
-                for setting in result:
-                    function_executor = get_function_executor(
-                        setting["function"]["type"]
-                    )
-                    setting["function"] = function_executor.to_arguments(
-                        setting["function"]
-                    )
-            return result
-        except (InvalidFunction, FunctionNotFound) as e:
-            raise e
-        except:
-            raise FunctionLoadFailed()
-
-    async def truncate_message_history(
-        self, messages, exposed_entities, user_input: conversation.ConversationInput
-    ):
-        """Truncate message history."""
-        strategy = self.entry.options.get(
-            CONF_CONTEXT_TRUNCATE_STRATEGY, DEFAULT_CONTEXT_TRUNCATE_STRATEGY
-        )
-
-        if strategy == "clear":
-            last_user_message_index = None
-            for i in reversed(range(len(messages))):
-                if messages[i]["role"] == "user":
-                    last_user_message_index = i
-                    break
-
-            if last_user_message_index is not None:
-                del messages[1:last_user_message_index]
-                # refresh system prompt when all messages are deleted
-                messages[0] = self._generate_system_message(
-                    exposed_entities, user_input
-                )
-
-    async def query(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        exposed_entities,
-        n_requests,
-    ) -> OpenAIQueryResponse:
-        """Process a sentence."""
-        model = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
-        max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-        top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
-        temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
-        use_tools = self.entry.options.get(CONF_USE_TOOLS, DEFAULT_USE_TOOLS)
-        context_threshold = self.entry.options.get(
-            CONF_CONTEXT_THRESHOLD, DEFAULT_CONTEXT_THRESHOLD
-        )
-        functions = list(map(lambda s: s["spec"], self.get_functions()))
-        function_call = "auto"
-        if n_requests == self.entry.options.get(
-            CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-            DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-        ):
-            function_call = "none"
-
-        tool_kwargs = {"functions": functions, "function_call": function_call}
-        if use_tools:
-            tool_kwargs = {
-                "tools": [{"type": "function", "function": func} for func in functions],
-                "tool_choice": function_call,
-            }
-
-        if len(functions) == 0:
-            tool_kwargs = {}
-
-        _LOGGER.info("Prompt for %s: %s", model, json.dumps(messages))
-
-        response: ChatCompletion = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            temperature=temperature,
-            user=user_input.conversation_id,
-            **tool_kwargs,
-        )
-
-        _LOGGER.info("Response %s", json.dumps(response.model_dump(exclude_none=True)))
-
-        if response.usage.total_tokens > context_threshold:
-            await self.truncate_message_history(messages, exposed_entities, user_input)
-
-        choice: Choice = response.choices[0]
-        message = choice.message
-
-        if choice.finish_reason == "function_call":
-            return await self.execute_function_call(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
-        if choice.finish_reason == "tool_calls":
-            return await self.execute_tool_calls(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
-        if choice.finish_reason == "length":
-            raise TokenLengthExceededError(response.usage.completion_tokens)
-
-        return OpenAIQueryResponse(response=response, message=message)
-
-    async def execute_function_call(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        message: ChatCompletionMessage,
-        exposed_entities,
-        n_requests,
-    ) -> OpenAIQueryResponse:
-        function_name = message.function_call.name
-        function = next(
-            (s for s in self.get_functions() if s["spec"]["name"] == function_name),
-            None,
-        )
-        if function is not None:
-            return await self.execute_function(
-                user_input,
-                messages,
-                message,
-                exposed_entities,
-                n_requests,
-                function,
-            )
-        raise FunctionNotFound(function_name)
-
-    async def execute_function(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        message: ChatCompletionMessage,
-        exposed_entities,
-        n_requests,
-        function,
-    ) -> OpenAIQueryResponse:
-        function_executor = get_function_executor(function["function"]["type"])
+        # Prepare the contents for Google’s client
+        contents = [conversation_text]
 
         try:
-            arguments = json.loads(message.function_call.arguments)
-        except json.decoder.JSONDecodeError as err:
-            raise ParseArgumentsFailed(message.function_call.arguments) from err
-
-        result = await function_executor.execute(
-            self.hass, function["function"], arguments, user_input, exposed_entities
-        )
-
-        messages.append(
-            {
-                "role": "function",
-                "name": message.function_call.name,
-                "content": str(result),
-            }
-        )
-        return await self.query(user_input, messages, exposed_entities, n_requests)
-
-    async def execute_tool_calls(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        message: ChatCompletionMessage,
-        exposed_entities,
-        n_requests,
-    ) -> OpenAIQueryResponse:
-        messages.append(message.model_dump(exclude_none=True))
-        for tool in message.tool_calls:
-            function_name = tool.function.name
-            function = next(
-                (s for s in self.get_functions() if s["spec"]["name"] == function_name),
-                None,
+            response = await self.client.aio.models.generate_content(
+                model=self.entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL),
+                contents=contents,
             )
-            if function is not None:
-                result = await self.execute_tool_function(
-                    user_input,
-                    tool,
-                    exposed_entities,
-                    function,
-                )
+        except (APIError, ValueError) as err:
+            raise HomeAssistantError(f"Generative AI error: {err}") from err
 
-                messages.append(
-                    {
-                        "tool_call_id": tool.id,
-                        "role": "tool",
-                        "name": function_name,
-                        "content": str(result),
-                    }
-                )
-            else:
-                raise FunctionNotFound(function_name)
-        return await self.query(user_input, messages, exposed_entities, n_requests)
+        if response.prompt_feedback:
+            raise HomeAssistantError(
+                f"Content violation: {response.prompt_feedback.block_reason_message}"
+            )
 
-    async def execute_tool_function(
-        self,
-        user_input: conversation.ConversationInput,
-        tool,
-        exposed_entities,
-        function,
-    ) -> OpenAIQueryResponse:
-        function_executor = get_function_executor(function["function"]["type"])
+        if not response.candidates or not response.candidates[0].content.parts:
+            raise HomeAssistantError("No valid response from Generative AI.")
 
+        return response.text
+
+    async def _maybe_execute_function(self, response_text: str) -> str | None:
+        """
+        Look for a JSON block that indicates a function call.
+        If found, parse it, execute the function, and return the result.
+        If no function call is indicated, return None.
+        """
+        # Attempt to parse as JSON
         try:
-            arguments = json.loads(tool.function.arguments)
-        except json.decoder.JSONDecodeError as err:
-            raise ParseArgumentsFailed(tool.function.arguments) from err
+            parsed = json.loads(response_text)
+            if "function_call" not in parsed:
+                return None
+        except (json.JSONDecodeError, TypeError):
+            return None
 
-        result = await function_executor.execute(
-            self.hass, function["function"], arguments, user_input, exposed_entities
-        )
-        return result
+        call_data = parsed["function_call"]
+        name = call_data.get("name")
+        arguments = call_data.get("arguments", {})
 
+        # Look up the function
+        raw_functions = self.entry.options.get(CONF_FUNCTIONS, "[]")
+        functions_list = load_functions(raw_functions)
+        func_spec = next((f for f in functions_list if f["name"] == name), None)
+        if not func_spec:
+            return f"Function '{name}' not found."
 
-class OpenAIQueryResponse:
-    """OpenAI query response value object."""
+        # Here you decide how to route to the correct function
+        # For demonstration, we only handle a single example function
+        if name == "example_function":
+            try:
+                result = execute_example_function(self.hass, arguments)
+                return result
+            except Exception as err:  # broad except for demonstration
+                return f"Error in function '{name}': {err}"
 
-    def __init__(
-        self, response: ChatCompletion, message: ChatCompletionMessage
-    ) -> None:
-        """Initialize OpenAI query response value object."""
-        self.response = response
-        self.message = message
+        # If you had multiple functions, you'd add additional handling.
+        return f"Function '{name}' is recognized but not implemented."
