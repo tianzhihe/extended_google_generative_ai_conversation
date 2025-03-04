@@ -1,755 +1,574 @@
-from abc import ABC, abstractmethod
-from datetime import timedelta
-from functools import partial
-import logging
+"""Google Generative AI Conversation integration with function calling."""
+
+from __future__ import annotations
+
+import codecs
+from collections.abc import Callable
+from typing import Any, Literal, cast
+
+from google.genai.errors import APIError
+from google.genai.types import (
+    AutomaticFunctionCallingConfig,
+    Content,
+    FunctionDeclaration,
+    GenerateContentConfig,
+    HarmCategory,
+    Part,
+    SafetySetting,
+    Schema,
+    Tool,
+)
+from voluptuous_openapi import convert
+
+from homeassistant.components import assist_pipeline, conversation
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import chat_session, device_registry as dr, intent, llm
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+# ---------------------------------------------------------------------
+# IMPORT your constants, including function-calling toggles:
+# (Adjust the import to match your actual project structure.)
+# ---------------------------------------------------------------------
+from .const import (
+    DOMAIN,
+    LOGGER,
+    EVENT_CONVERSATION_FINISHED,
+    CONF_PROMPT,
+    CONF_USE_FUNCTIONS,
+    CONF_FUNCTIONS,
+    DEFAULT_FUNCTIONS,
+    DEFAULT_USE_FUNCTIONS,
+    CONF_MAX_TOKENS,
+    RECOMMENDED_MAX_TOKENS,
+    CONF_TEMPERATURE,
+    RECOMMENDED_TEMPERATURE,
+    CONF_TOP_K,
+    RECOMMENDED_TOP_K,
+    CONF_TOP_P,
+    RECOMMENDED_TOP_P,
+    CONF_CHAT_MODEL,
+    RECOMMENDED_CHAT_MODEL,
+    CONF_HARASSMENT_BLOCK_THRESHOLD,
+    CONF_HATE_BLOCK_THRESHOLD,
+    CONF_DANGEROUS_BLOCK_THRESHOLD,
+    CONF_SEXUAL_BLOCK_THRESHOLD,
+    RECOMMENDED_HARM_BLOCK_THRESHOLD,
+    TIMEOUT_MILLIS,
+    # etc.
+)
+
+MAX_TOOL_ITERATIONS = 10  # How many times we allow back-and-forth calls
+
+# ---------------------------------------------------------------------
+# RE-USE THE helpers.py logic or embed it here directly.
+# The snippet below shows a simplified example referencing your
+# actual helpers.py classes and constants.
+# ---------------------------------------------------------------------
 import os
 import re
 import sqlite3
 import time
-from typing import Any
-from urllib import parse
-
-from bs4 import BeautifulSoup
-from openai import AsyncAzureOpenAI, AsyncOpenAI
-import voluptuous as vol
 import yaml
+import voluptuous as vol
 
-from homeassistant.components import (
-    automation,
-    conversation,
-    energy,
-    recorder,
-    rest,
-    scrape,
-)
-from homeassistant.components.automation.config import _async_validate_config_item
-from homeassistant.components.script.config import SCRIPT_ENTITY_SCHEMA
-from homeassistant.config import AUTOMATION_CONFIG_PATH
-from homeassistant.const import (
-    CONF_ATTRIBUTE,
-    CONF_METHOD,
-    CONF_NAME,
-    CONF_PAYLOAD,
-    CONF_RESOURCE,
-    CONF_RESOURCE_TEMPLATE,
-    CONF_TIMEOUT,
-    CONF_VALUE_TEMPLATE,
-    CONF_VERIFY_SSL,
-    SERVICE_RELOAD,
-)
-from homeassistant.core import HomeAssistant, State
-from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.httpx_client import get_async_client
-from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template
-import homeassistant.util.dt as dt_util
+from homeassistant.exceptions import ServiceNotFound
 
-from .const import CONF_PAYLOAD_TEMPLATE, DOMAIN, EVENT_AUTOMATION_REGISTERED
-from .exceptions import (
-    CallServiceError,
-    EntityNotExposed,
+from .helpers import (
+    FUNCTION_EXECUTORS,
+    get_function_executor,
+    NativeFunctionExecutor,
+    HomeAssistantError,
     EntityNotFound,
+    EntityNotExposed,
     FunctionNotFound,
     InvalidFunction,
-    NativeNotFound,
+    # etc...
 )
 
-_LOGGER = logging.getLogger(__name__)
+# You might want a helper function to load a user’s function definitions from
+# your config entry or from an OptionsFlow. The example below is simplistic:
+def load_functions_from_config(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> list[dict[str, Any]]:
+    """Load function definitions (schemas) from the user's config entry."""
+    raw = entry.options.get(CONF_FUNCTIONS, DEFAULT_FUNCTIONS)
+    try:
+        data = yaml.safe_load(raw) if isinstance(raw, str) else []
+        if not data:
+            return []
+        return data
+    except (yaml.YAMLError, TypeError):
+        LOGGER.warning("Failed to parse function definitions from config.")
+        return []
 
 
-AZURE_DOMAIN_PATTERN = r"\.(openai\.azure\.com|azure-api\.net)"
+# ---------------------------------------------------------------------
+# The existing code from the Google integration is below, updated to:
+#  1) Parse the user’s function definitions
+#  2) Build Tools for them
+#  3) If the AI calls a function, run it through the appropriate executor
+# ---------------------------------------------------------------------
+SUPPORTED_SCHEMA_KEYS = {
+    "min_items",
+    "example",
+    "property_ordering",
+    "pattern",
+    "minimum",
+    "default",
+    "any_of",
+    "max_length",
+    "title",
+    "min_properties",
+    "min_length",
+    "max_items",
+    "maximum",
+    "nullable",
+    "max_properties",
+    "type",
+    "description",
+    "enum",
+    "format",
+    "items",
+    "properties",
+    "required",
+}
+
+def _camel_to_snake(name: str) -> str:
+    return "".join(["_" + c.lower() if c.isupper() else c for c in name]).lstrip("_")
+
+def _format_schema(schema: dict[str, Any]) -> Schema:
+    """Adapt JSON schemas to the Google generative AI schema."""
+    if subschemas := schema.get("allOf"):
+        for subschema in subschemas:
+            if "type" in subschema:
+                return _format_schema(subschema)
+        return _format_schema(subschemas[0])
+
+    result = {}
+    for key, val in schema.items():
+        key = _camel_to_snake(key)
+        if key not in SUPPORTED_SCHEMA_KEYS:
+            continue
+        if key == "any_of":
+            val = [_format_schema(subschema) for subschema in val]
+        elif key == "type":
+            val = val.upper()
+        elif key == "format":
+            # Only keep recognized formats...
+            if schema.get("type") == "string" and val not in ("enum", "date-time"):
+                continue
+            if schema.get("type") == "number" and val not in ("float", "double"):
+                continue
+            if schema.get("type") == "integer" and val not in ("int32", "int64"):
+                continue
+        elif key == "items":
+            val = _format_schema(val)
+        elif key == "properties":
+            val = {k: _format_schema(v) for k, v in val.items()}
+        result[key] = val
+
+    if result.get("enum") and result.get("type") != "STRING":
+        result["type"] = "STRING"
+        result["enum"] = [str(item) for item in result["enum"]]
+
+    if result.get("type") == "OBJECT" and not result.get("properties"):
+        result["properties"] = {"json": {"type": "STRING"}}
+        result["required"] = []
+    return cast(Schema, result)
+
+def _escape_decode(value: Any) -> Any:
+    """Recursively call codecs.escape_decode on all strings."""
+    if isinstance(value, str):
+        return codecs.escape_decode(bytes(value, "utf-8"))[0].decode("utf-8")
+    if isinstance(value, list):
+        return [_escape_decode(item) for item in value]
+    if isinstance(value, dict):
+        return {k: _escape_decode(v) for k, v in value.items()}
+    return value
+
+def _create_google_tool_response_content(
+    content: list[conversation.ToolResultContent],
+) -> Content:
+    """Convert HA's tool results into a Google Content containing function responses."""
+    return Content(
+        parts=[
+            Part.from_function_response(name=tool_result.tool_name, response=tool_result.tool_result)
+            for tool_result in content
+        ]
+    )
+
+def _convert_content(
+    content: conversation.UserContent
+    | conversation.AssistantContent
+    | conversation.SystemContent,
+) -> Content:
+    """Convert a Home Assistant content to Google Generative AI content."""
+    if content.role != "assistant" or not content.tool_calls:  # type: ignore
+        role = "model" if content.role == "assistant" else content.role
+        return Content(
+            role=role,
+            parts=[Part.from_text(text=content.content if content.content else "")],
+        )
+
+    # If we have Assistant content with tool calls, we separate them
+    parts: list[Part] = []
+    if content.content:
+        parts.append(Part.from_text(text=content.content))
+
+    if content.tool_calls:
+        for tool_call in content.tool_calls:
+            tool_args = _escape_decode(tool_call.tool_args)
+            parts.append(Part.from_function_call(name=tool_call.tool_name, args=tool_args))
+
+    return Content(role="model", parts=parts)
 
 
-def get_function_executor(value: str):
-    function_executor = FUNCTION_EXECUTORS.get(value)
-    if function_executor is None:
-        raise FunctionNotFound(value)
-    return function_executor
-
-
-def is_azure(base_url: str):
-    if base_url and re.search(AZURE_DOMAIN_PATTERN, base_url):
-        return True
-    return False
-
-
-def convert_to_template(
-    settings,
-    template_keys=["data", "event_data", "target", "service"],
-    hass: HomeAssistant | None = None,
+class GoogleGenerativeAIConversationEntity(
+    conversation.ConversationEntity, conversation.AbstractConversationAgent
 ):
-    _convert_to_template(settings, template_keys, hass, [])
+    """Google Generative AI conversation agent with function-calling integration."""
 
+    _attr_has_entity_name = True
+    _attr_name = None
 
-def _convert_to_template(settings, template_keys, hass, parents: list[str]):
-    if isinstance(settings, dict):
-        for key, value in settings.items():
-            if isinstance(value, str) and (
-                key in template_keys or set(parents).intersection(template_keys)
-            ):
-                settings[key] = Template(value, hass)
-            if isinstance(value, dict):
-                parents.append(key)
-                _convert_to_template(value, template_keys, hass, parents)
-                parents.pop()
-            if isinstance(value, list):
-                parents.append(key)
-                for item in value:
-                    _convert_to_template(item, template_keys, hass, parents)
-                parents.pop()
-    if isinstance(settings, list):
-        for setting in settings:
-            _convert_to_template(setting, template_keys, hass, parents)
+    def __init__(self, entry: ConfigEntry) -> None:
+        """Initialize the entity."""
+        self.entry = entry
+        self._genai_client = entry.runtime_data
+        self._attr_unique_id = entry.entry_id
+        self._attr_device_info = dr.DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer="Google",
+            model="Generative AI",
+            entry_type=dr.DeviceEntryType.SERVICE,
+        )
+        if self.entry.options.get(CONF_LLM_HASS_API):
+            self._attr_supported_features = (
+                conversation.ConversationEntityFeature.CONTROL
+            )
 
+    @property
+    def supported_languages(self) -> list[str] | Literal["*"]:
+        return MATCH_ALL
 
-def _get_rest_data(hass, rest_config, arguments):
-    rest_config.setdefault(CONF_METHOD, rest.const.DEFAULT_METHOD)
-    rest_config.setdefault(CONF_VERIFY_SSL, rest.const.DEFAULT_VERIFY_SSL)
-    rest_config.setdefault(CONF_TIMEOUT, rest.data.DEFAULT_TIMEOUT)
-    rest_config.setdefault(rest.const.CONF_ENCODING, rest.const.DEFAULT_ENCODING)
-
-    resource_template: Template | None = rest_config.get(CONF_RESOURCE_TEMPLATE)
-    if resource_template is not None:
-        rest_config.pop(CONF_RESOURCE_TEMPLATE)
-        rest_config[CONF_RESOURCE] = resource_template.async_render(
-            arguments, parse_result=False
+    async def async_added_to_hass(self) -> None:
+        """When entity is added to Home Assistant."""
+        await super().async_added_to_hass()
+        assist_pipeline.async_migrate_engine(
+            self.hass, "conversation", self.entry.entry_id, self.entity_id
+        )
+        conversation.async_set_agent(self.hass, self.entry, self)
+        self.entry.async_on_unload(
+            self.entry.add_update_listener(self._async_entry_update_listener)
         )
 
-    payload_template: Template | None = rest_config.get(CONF_PAYLOAD_TEMPLATE)
-    if payload_template is not None:
-        rest_config.pop(CONF_PAYLOAD_TEMPLATE)
-        rest_config[CONF_PAYLOAD] = payload_template.async_render(
-            arguments, parse_result=False
-        )
+    async def async_will_remove_from_hass(self) -> None:
+        """When entity is removed."""
+        conversation.async_unset_agent(self.hass, self.entry)
+        await super().async_will_remove_from_hass()
 
-    return rest.create_rest_data_from_config(hass, rest_config)
+    async def async_process(
+        self, user_input: conversation.ConversationInput
+    ) -> conversation.ConversationResult:
+        """Process a user query."""
+        with (
+            chat_session.async_get_chat_session(
+                self.hass, user_input.conversation_id
+            ) as session,
+            conversation.async_get_chat_log(self.hass, session, user_input) as chat_log,
+        ):
+            return await self._async_handle_message(user_input, chat_log)
 
+    async def _async_handle_message(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> conversation.ConversationResult:
+        """Send a request to the Google Generative AI model and handle tool/function calls."""
 
-async def validate_authentication(
-    hass: HomeAssistant,
-    api_key: str,
-    base_url: str,
-    api_version: str,
-    organization: str = None,
-    skip_authentication=False,
-) -> None:
-    if skip_authentication:
-        return
-
-    if is_azure(base_url):
-        client = AsyncAzureOpenAI(
-            api_key=api_key,
-            azure_endpoint=base_url,
-            api_version=api_version,
-            organization=organization,
-            http_client=get_async_client(hass),
-        )
-    else:
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            organization=organization,
-            http_client=get_async_client(hass),
-        )
-
-    await hass.async_add_executor_job(partial(client.models.list, timeout=10))
-
-
-class FunctionExecutor(ABC):
-    def __init__(self, data_schema=vol.Schema({})) -> None:
-        """initialize function executor"""
-        self.data_schema = data_schema.extend({vol.Required("type"): str})
-
-    def to_arguments(self, arguments):
-        """to_arguments function"""
+        options = self.entry.options
         try:
-            return self.data_schema(arguments)
-        except vol.error.Error as e:
-            function_type = next(
-                (key for key, value in FUNCTION_EXECUTORS.items() if value == self),
-                None,
+            await chat_log.async_update_llm_data(
+                DOMAIN,
+                user_input,
+                options.get(CONF_LLM_HASS_API),
+                options.get(CONF_PROMPT),
             )
-            raise InvalidFunction(function_type) from e
+        except conversation.ConverseError as err:
+            return err.as_conversation_result()
 
-    def validate_entity_ids(self, hass: HomeAssistant, entity_ids, exposed_entities):
-        if any(hass.states.get(entity_id) is None for entity_id in entity_ids):
-            raise EntityNotFound(entity_ids)
-        exposed_entity_ids = map(lambda e: e["entity_id"], exposed_entities)
-        if not set(entity_ids).issubset(exposed_entity_ids):
-            raise EntityNotExposed(entity_ids)
+        # --- 1. Build Tools from the user’s function definitions (similar to openai) ---
+        tools: list[Tool] = []
+        use_functions = options.get(CONF_USE_FUNCTIONS, DEFAULT_USE_FUNCTIONS)
+        if use_functions:
+            user_functions = load_functions_from_config(self.hass, self.entry)
+            for fdef in user_functions:
+                spec = fdef.get("spec", {})
+                # Convert the JSON schema to Google's format:
+                parameters = None
+                if "parameters" in spec:
+                    # Use voluptuous_openapi.convert() to produce a dict
+                    # Then use _format_schema to adapt it for Google
+                    parameters = _format_schema(
+                        convert(spec["parameters"])
+                    )
+                # Create a Google "Tool" with the function name and any schema
+                tool = Tool(
+                    function_declarations=[
+                        FunctionDeclaration(
+                            name=spec.get("name", "unnamed_tool"),
+                            description=spec.get("description", ""),
+                            parameters=parameters,
+                        )
+                    ]
+                )
+                tools.append(tool)
+        else:
+            # fallback: user might also have pipelines from llm_api
+            if chat_log.llm_api:
+                tools = [
+                    Tool(
+                        function_declarations=[
+                            FunctionDeclaration(
+                                name=t.name,
+                                description=t.description,
+                                parameters=(
+                                    _format_schema(
+                                        convert(t.parameters, custom_serializer=chat_log.llm_api.custom_serializer)
+                                    )
+                                    if t.parameters and t.parameters.schema
+                                    else None
+                                ),
+                            )
+                        ]
+                    )
+                    for t in chat_log.llm_api.tools
+                ]
 
-    @abstractmethod
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        """execute function"""
+        # --- 2. Prepare the user’s conversation messages for Google ---
+        model_name = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
+        supports_system_instruction = ("gemini-1.0" not in model_name and "gemini-pro" not in model_name)
 
+        prompt_content = cast(conversation.SystemContent, chat_log.content[0])
+        if not prompt_content.content:
+            raise HomeAssistantError("Invalid or empty system prompt content.")
 
-class NativeFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize native function"""
-        super().__init__(vol.Schema({vol.Required("name"): str}))
+        # Flatten conversation into Google Content objects
+        messages: list[Content] = []
+        tool_results: list[conversation.ToolResultContent] = []
+        # We skip the final item (user message) because we supply it below:
+        for chat_content in chat_log.content[1:-1]:
+            if chat_content.role == "tool_result":
+                tool_results.append(cast(conversation.ToolResultContent, chat_content))
+                continue
+            # If we have pending tool results, flush them as a single "function response"
+            if tool_results:
+                messages.append(_create_google_tool_response_content(tool_results))
+                tool_results.clear()
 
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        name = function["name"]
-        if name == "execute_service":
-            return await self.execute_service(
-                hass, function, arguments, user_input, exposed_entities
-            )
-        if name == "execute_service_single":
-            return await self.execute_service_single(
-                hass, function, arguments, user_input, exposed_entities
-            )
-        if name == "add_automation":
-            return await self.add_automation(
-                hass, function, arguments, user_input, exposed_entities
-            )
-        if name == "get_history":
-            return await self.get_history(
-                hass, function, arguments, user_input, exposed_entities
-            )
-        if name == "get_energy":
-            return await self.get_energy(
-                hass, function, arguments, user_input, exposed_entities
-            )
-        if name == "get_statistics":
-            return await self.get_statistics(
-                hass, function, arguments, user_input, exposed_entities
-            )
-        if name == "get_user_from_user_id":
-            return await self.get_user_from_user_id(
-                hass, function, arguments, user_input, exposed_entities
-            )
-
-        raise NativeNotFound(name)
-
-    async def execute_service_single(
-        self,
-        hass: HomeAssistant,
-        function,
-        service_argument,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        domain = service_argument["domain"]
-        service = service_argument["service"]
-        service_data = service_argument.get(
-            "service_data", service_argument.get("data", {})
-        )
-        entity_id = service_data.get("entity_id", service_argument.get("entity_id"))
-        area_id = service_data.get("area_id")
-        device_id = service_data.get("device_id")
-
-        if isinstance(entity_id, str):
-            entity_id = [e.strip() for e in entity_id.split(",")]
-        service_data["entity_id"] = entity_id
-
-        if entity_id is None and area_id is None and device_id is None:
-            raise CallServiceError(domain, service, service_data)
-        if not hass.services.has_service(domain, service):
-            raise ServiceNotFound(domain, service)
-        self.validate_entity_ids(hass, entity_id or [], exposed_entities)
-
-        try:
-            await hass.services.async_call(
-                domain=domain,
-                service=service,
-                service_data=service_data,
-            )
-            return {"success": True}
-        except HomeAssistantError as e:
-            _LOGGER.error(e)
-            return {"error": str(e)}
-
-    async def execute_service(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        result = []
-        for service_argument in arguments.get("list", []):
-            result.append(
-                await self.execute_service_single(
-                    hass, function, service_argument, user_input, exposed_entities
+            messages.append(
+                _convert_content(
+                    cast(
+                        conversation.UserContent
+                        | conversation.SystemContent
+                        | conversation.AssistantContent,
+                        chat_content,
+                    )
                 )
             )
-        return result
+        # If leftover tool results:
+        if tool_results:
+            messages.append(_create_google_tool_response_content(tool_results))
 
-    async def add_automation(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        automation_config = yaml.safe_load(arguments["automation_config"])
-        config = {"id": str(round(time.time() * 1000))}
-        if isinstance(automation_config, list):
-            config.update(automation_config[0])
-        if isinstance(automation_config, dict):
-            config.update(automation_config)
+        # The final user message in chat_log.content[-1] is presumably user_input.text
+        # We do not convert it into a separate Content because the send_message method
+        # below uses chat_request = user_input.text.
 
-        await _async_validate_config_item(hass, config, True, False)
-
-        automations = [config]
-        with open(
-            os.path.join(hass.config.config_dir, AUTOMATION_CONFIG_PATH),
-            "r",
-            encoding="utf-8",
-        ) as f:
-            current_automations = yaml.safe_load(f.read())
-
-        with open(
-            os.path.join(hass.config.config_dir, AUTOMATION_CONFIG_PATH),
-            "a" if current_automations else "w",
-            encoding="utf-8",
-        ) as f:
-            raw_config = yaml.dump(automations, allow_unicode=True, sort_keys=False)
-            f.write("\n" + raw_config)
-
-        await hass.services.async_call(automation.config.DOMAIN, SERVICE_RELOAD)
-        hass.bus.async_fire(
-            EVENT_AUTOMATION_REGISTERED,
-            {"automation_config": config, "raw_config": raw_config},
-        )
-        return "Success"
-
-    async def get_history(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        start_time = arguments.get("start_time")
-        end_time = arguments.get("end_time")
-        entity_ids = arguments.get("entity_ids", [])
-        include_start_time_state = arguments.get("include_start_time_state", True)
-        significant_changes_only = arguments.get("significant_changes_only", True)
-        minimal_response = arguments.get("minimal_response", True)
-        no_attributes = arguments.get("no_attributes", True)
-
-        now = dt_util.utcnow()
-        one_day = timedelta(days=1)
-        start_time = self.as_utc(start_time, now - one_day, "start_time not valid")
-        end_time = self.as_utc(end_time, start_time + one_day, "end_time not valid")
-
-        self.validate_entity_ids(hass, entity_ids, exposed_entities)
-
-        with recorder.util.session_scope(hass=hass, read_only=True) as session:
-            result = await recorder.get_instance(hass).async_add_executor_job(
-                recorder.history.get_significant_states_with_session,
-                hass,
-                session,
-                start_time,
-                end_time,
-                entity_ids,
-                None,
-                include_start_time_state,
-                significant_changes_only,
-                minimal_response,
-                no_attributes,
-            )
-
-        return [[self.as_dict(item) for item in sublist] for sublist in result.values()]
-
-    async def get_energy(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        energy_manager: energy.data.EnergyManager = await energy.async_get_manager(hass)
-        return energy_manager.data
-
-    async def get_user_from_user_id(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        user = await hass.auth.async_get_user(user_input.context.user_id)
-        return {'name': user.name if user and hasattr(user, 'name') else 'Unknown'}
-
-    async def get_statistics(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        statistic_ids = arguments.get("statistic_ids", [])
-        start_time = dt_util.as_utc(dt_util.parse_datetime(arguments["start_time"]))
-        end_time = dt_util.as_utc(dt_util.parse_datetime(arguments["end_time"]))
-
-        return await recorder.get_instance(hass).async_add_executor_job(
-            recorder.statistics.statistics_during_period,
-            hass,
-            start_time,
-            end_time,
-            statistic_ids,
-            arguments.get("period", "day"),
-            arguments.get("units"),
-            arguments.get("types", {"change"}),
-        )
-
-    def as_utc(self, value: str, default_value, parse_error_message: str):
-        if value is None:
-            return default_value
-
-        parsed_datetime = dt_util.parse_datetime(value)
-        if parsed_datetime is None:
-            raise HomeAssistantError(parse_error_message)
-
-        return dt_util.as_utc(parsed_datetime)
-
-    def as_dict(self, state: State | dict[str, Any]):
-        if isinstance(state, State):
-            return state.as_dict()
-        return state
-
-
-class ScriptFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize script function"""
-        super().__init__(SCRIPT_ENTITY_SCHEMA)
-
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        script = Script(
-            hass,
-            function["sequence"],
-            "extended_openai_conversation",
-            DOMAIN,
-            running_description="[extended_openai_conversation] function",
-            logger=_LOGGER,
-        )
-
-        result = await script.async_run(
-            run_variables=arguments, context=user_input.context
-        )
-        return result.variables.get("_function_result", "Success")
-
-
-class TemplateFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize template function"""
-        super().__init__(
-            vol.Schema(
-                {
-                    vol.Required("value_template"): cv.template,
-                    vol.Optional("parse_result"): bool,
-                }
-            )
-        )
-
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        return function["value_template"].async_render(
-            arguments,
-            parse_result=function.get("parse_result", False),
-        )
-
-
-class RestFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize Rest function"""
-        super().__init__(
-            vol.Schema(rest.RESOURCE_SCHEMA).extend(
-                {
-                    vol.Optional("value_template"): cv.template,
-                    vol.Optional("payload_template"): cv.template,
-                }
-            )
-        )
-
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        config = function
-        rest_data = _get_rest_data(hass, config, arguments)
-
-        await rest_data.async_update()
-        value = rest_data.data_without_xml()
-        value_template = config.get(CONF_VALUE_TEMPLATE)
-
-        if value is not None and value_template is not None:
-            value = value_template.async_render_with_possible_json_value(
-                value, None, arguments
-            )
-
-        return value
-
-
-class ScrapeFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize Scrape function"""
-        super().__init__(
-            scrape.COMBINED_SCHEMA.extend(
-                {
-                    vol.Optional("value_template"): cv.template,
-                    vol.Optional("payload_template"): cv.template,
-                }
-            )
-        )
-
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        config = function
-        rest_data = _get_rest_data(hass, config, arguments)
-        coordinator = scrape.coordinator.ScrapeCoordinator(
-            hass,
-            rest_data,
-            scrape.const.DEFAULT_SCAN_INTERVAL,
-        )
-        await coordinator.async_config_entry_first_refresh()
-
-        new_arguments = dict(arguments)
-
-        for sensor_config in config["sensor"]:
-            name: Template = sensor_config.get(CONF_NAME)
-            value = self._async_update_from_rest_data(
-                coordinator.data, sensor_config, arguments
-            )
-            new_arguments["value"] = value
-            if name:
-                new_arguments[name.async_render()] = value
-
-        result = new_arguments["value"]
-        value_template = config.get(CONF_VALUE_TEMPLATE)
-
-        if value_template is not None:
-            result = value_template.async_render_with_possible_json_value(
-                result, None, new_arguments
-            )
-
-        return result
-
-    def _async_update_from_rest_data(
-        self,
-        data: BeautifulSoup,
-        sensor_config: dict[str, Any],
-        arguments: dict[str, Any],
-    ) -> None:
-        """Update state from the rest data."""
-        value = self._extract_value(data, sensor_config)
-        value_template = sensor_config.get(CONF_VALUE_TEMPLATE)
-
-        if value_template is not None:
-            value = value_template.async_render_with_possible_json_value(
-                value, None, arguments
-            )
-
-        return value
-
-    def _extract_value(self, data: BeautifulSoup, sensor_config: dict[str, Any]) -> Any:
-        """Parse the html extraction in the executor."""
-        value: str | list[str] | None
-        select = sensor_config[scrape.const.CONF_SELECT]
-        index = sensor_config.get(scrape.const.CONF_INDEX, 0)
-        attr = sensor_config.get(CONF_ATTRIBUTE)
-        try:
-            if attr is not None:
-                value = data.select(select)[index][attr]
-            else:
-                tag = data.select(select)[index]
-                if tag.name in ("style", "script", "template"):
-                    value = tag.string
-                else:
-                    value = tag.text
-        except IndexError:
-            _LOGGER.warning("Index '%s' not found", index)
-            value = None
-        except KeyError:
-            _LOGGER.warning("Attribute '%s' not found", attr)
-            value = None
-        _LOGGER.debug("Parsed value: %s", value)
-        return value
-
-
-class CompositeFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize composite function"""
-        super().__init__(
-            vol.Schema(
-                {
-                    vol.Required("sequence"): vol.All(
-                        cv.ensure_list, [self.function_schema]
-                    )
-                }
-            )
-        )
-
-    def function_schema(self, value: Any) -> dict:
-        """Validate a composite function schema."""
-        if not isinstance(value, dict):
-            raise vol.Invalid("expected dictionary")
-
-        composite_schema = {vol.Optional("response_variable"): str}
-        function_executor = get_function_executor(value["type"])
-
-        return function_executor.data_schema.extend(composite_schema)(value)
-
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        config = function
-        sequence = config["sequence"]
-
-        for executor_config in sequence:
-            function_executor = get_function_executor(executor_config["type"])
-            result = await function_executor.execute(
-                hass, executor_config, arguments, user_input, exposed_entities
-            )
-
-            response_variable = executor_config.get("response_variable")
-            if response_variable:
-                arguments[response_variable] = result
-
-        return result
-
-
-class SqliteFunctionExecutor(FunctionExecutor):
-    def __init__(self) -> None:
-        """initialize sqlite function"""
-        super().__init__(
-            vol.Schema(
-                {
-                    vol.Optional("query"): str,
-                    vol.Optional("db_url"): str,
-                    vol.Optional("single"): bool,
-                }
-            )
-        )
-
-    def is_exposed(self, entity_id, exposed_entities) -> bool:
-        return any(
-            exposed_entity["entity_id"] == entity_id
-            for exposed_entity in exposed_entities
-        )
-
-    def is_exposed_entity_in_query(self, query: str, exposed_entities) -> bool:
-        exposed_entity_ids = list(
-            map(lambda e: f"'{e['entity_id']}'", exposed_entities)
-        )
-        return any(
-            exposed_entity_id in query for exposed_entity_id in exposed_entity_ids
-        )
-
-    def raise_error(self, msg="Unexpected error occurred."):
-        raise HomeAssistantError(msg)
-
-    def get_default_db_url(self, hass: HomeAssistant) -> str:
-        db_file_path = os.path.join(hass.config.config_dir, recorder.DEFAULT_DB_FILE)
-        return f"file:{db_file_path}?mode=ro"
-
-    def set_url_read_only(self, url: str) -> str:
-        scheme, netloc, path, query_string, fragment = parse.urlsplit(url)
-        query_params = parse.parse_qs(query_string)
-
-        query_params["mode"] = ["ro"]
-        new_query_string = parse.urlencode(query_params, doseq=True)
-
-        return parse.urlunsplit((scheme, netloc, path, new_query_string, fragment))
-
-    async def execute(
-        self,
-        hass: HomeAssistant,
-        function,
-        arguments,
-        user_input: conversation.ConversationInput,
-        exposed_entities,
-    ):
-        db_url = self.set_url_read_only(
-            function.get("db_url", self.get_default_db_url(hass))
-        )
-        query = function.get("query", "{{query}}")
-
-        template_arguments = {
-            "is_exposed": lambda e: self.is_exposed(e, exposed_entities),
-            "is_exposed_entity_in_query": lambda q: self.is_exposed_entity_in_query(
-                q, exposed_entities
+        # --- 3. Build the config to call the model ---
+        generateContentConfig = GenerateContentConfig(
+            temperature=options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
+            top_k=options.get(CONF_TOP_K, RECOMMENDED_TOP_K),
+            top_p=options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
+            max_output_tokens=options.get(CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS),
+            safety_settings=[
+                SafetySetting(
+                    category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=options.get(CONF_HATE_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
+                ),
+                SafetySetting(
+                    category=HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=options.get(CONF_HARASSMENT_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
+                ),
+                SafetySetting(
+                    category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=options.get(CONF_DANGEROUS_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
+                ),
+                SafetySetting(
+                    category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=options.get(CONF_SEXUAL_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
+                ),
+            ],
+            tools=tools or None,
+            system_instruction=(prompt_content.content if supports_system_instruction else None),
+            # Google “automatic_function_calling” can be toggled if you want the LLM
+            # to auto-call functions. We'll keep it disabled and parse manually:
+            automatic_function_calling=AutomaticFunctionCallingConfig(
+                disable=True,
+                maximum_remote_calls=None,
             ),
-            "exposed_entities": exposed_entities,
-            "raise": self.raise_error,
-        }
-        template_arguments.update(arguments)
+        )
 
-        q = Template(query, hass).async_render(template_arguments)
-        _LOGGER.info("Rendered query: %s", q)
+        if not supports_system_instruction:
+            # Prepend the system prompt as user content
+            messages = [
+                Content(role="user", parts=[Part.from_text(text=prompt_content.content)]),
+                Content(role="model", parts=[Part.from_text(text="Ok")]),
+                *messages,
+            ]
 
-        with sqlite3.connect(db_url, uri=True) as conn:
-            cursor = conn.cursor().execute(q)
-            names = [description[0] for description in cursor.description]
+        # Create a chat session with the model.
+        chat = self._genai_client.aio.chats.create(
+            model=model_name,
+            history=messages,
+            config=generateContentConfig,
+        )
+        chat_request: str | Content = user_input.text  # The final user message
 
-            if function.get("single") is True:
-                row = cursor.fetchone()
-                return {name: val for name, val in zip(names, row)}
+        # --- 4. Repeatedly send messages to handle function calls & tool calls ---
+        for _iteration in range(MAX_TOOL_ITERATIONS):
+            try:
+                chat_response = await chat.send_message(message=chat_request)
+                if chat_response.prompt_feedback:
+                    raise HomeAssistantError(
+                        f"Your message was blocked for: {chat_response.prompt_feedback.block_reason_message}"
+                    )
+            except (APIError, ValueError) as err:
+                LOGGER.error("Error in chat.send_message: %s", err)
+                raise HomeAssistantError(f"Problem talking to Generative AI: {err}")
 
-            rows = cursor.fetchall()
-            result = []
-            for row in rows:
-                result.append({name: val for name, val in zip(names, row)})
-            return result
+            response_parts = chat_response.candidates[0].content.parts
+            if not response_parts:
+                raise HomeAssistantError("Empty response from Generative AI.")
 
+            # Collect the text portion for user
+            content = " ".join([part.text.strip() for part in response_parts if part.text])
 
-FUNCTION_EXECUTORS: dict[str, FunctionExecutor] = {
-    "native": NativeFunctionExecutor(),
-    "script": ScriptFunctionExecutor(),
-    "template": TemplateFunctionExecutor(),
-    "rest": RestFunctionExecutor(),
-    "scrape": ScrapeFunctionExecutor(),
-    "composite": CompositeFunctionExecutor(),
-    "sqlite": SqliteFunctionExecutor(),
-}
+            # Gather any function calls from the response
+            tool_calls = []
+            for part in response_parts:
+                if part.function_call:
+                    tool_calls.append(
+                        llm.ToolInput(
+                            tool_name=part.function_call.name,
+                            tool_args=_escape_decode(part.function_call.args),
+                        )
+                    )
+
+            # Register the assistant content & see if any tool calls result in function calls
+            chat_request = _create_google_tool_response_content(
+                [
+                    tool_response
+                    async for tool_response in chat_log.async_add_assistant_content(
+                        conversation.AssistantContent(
+                            agent_id=user_input.agent_id,
+                            content=content,
+                            tool_calls=tool_calls or None,
+                        )
+                    )
+                ]
+            )
+
+            # 5. If no calls, we're done
+            if not tool_calls:
+                break
+
+            # 6. If user has enabled function usage, attempt to run them
+            if not use_functions:
+                # If user didn't enable function usage, the LLM won't get real results
+                # We'll just feed an empty "function result" back
+                continue
+
+            # Load user function definitions again:
+            user_functions = load_functions_from_config(self.hass, self.entry)
+            # or combine with LLM API’s tools if you want
+
+            # For each function call, match it to our known function, run it, produce a “tool_result”
+            tool_results_list: list[conversation.ToolResultContent] = []
+            for call in tool_calls:
+                tool_name = call.tool_name
+                found_spec = next(
+                    (f for f in user_functions if f["spec"]["name"] == tool_name),
+                    None
+                )
+                if not found_spec:
+                    # Unknown function
+                    tool_results_list.append(
+                        conversation.ToolResultContent(
+                            tool_name=tool_name,
+                            tool_result={"error": f"Function '{tool_name}' not found."},
+                        )
+                    )
+                    continue
+
+                # We have a known function. Now see what "type" it is & run it
+                function_type = found_spec["function"].get("type")
+                try:
+                    executor = get_function_executor(function_type)
+                except FunctionNotFound:
+                    tool_results_list.append(
+                        conversation.ToolResultContent(
+                            tool_name=tool_name,
+                            tool_result={"error": f"Function type '{function_type}' missing."},
+                        )
+                    )
+                    continue
+
+                # Parse the call arguments as JSON
+                import json
+                try:
+                    args = json.loads(call.tool_args)
+                except json.JSONDecodeError:
+                    args = {}
+
+                # Execute it
+                exposed_entities = chat_log.exposed_entities  # or however you store them
+                try:
+                    result = await executor.execute(
+                        self.hass, found_spec["function"], args, user_input, exposed_entities
+                    )
+                    tool_results_list.append(
+                        conversation.ToolResultContent(
+                            tool_name=tool_name,
+                            tool_result=result,
+                        )
+                    )
+                except HomeAssistantError as e:
+                    tool_results_list.append(
+                        conversation.ToolResultContent(
+                            tool_name=tool_name,
+                            tool_result={"error": str(e)},
+                        )
+                    )
+
+            # After running all calls, we feed them back to the model as function responses
+            chat_request = _create_google_tool_response_content(tool_results_list)
+            # The conversation loop will continue
+
+        # 7. Construct final conversation response to user
+        response = intent.IntentResponse(language=user_input.language)
+        response.async_set_speech(content)
+        return conversation.ConversationResult(
+            response=response,
+            conversation_id=chat_log.conversation_id,
+        )
+
+    async def _async_entry_update_listener(
+        self, hass: HomeAssistant, entry: ConfigEntry
+    ) -> None:
+        """Handle options update (reload if needed)."""
+        await hass.config_entries.async_reload(entry.entry_id)
