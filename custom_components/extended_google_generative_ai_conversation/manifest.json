@@ -1,8 +1,8 @@
 {
-    "domain": "google_generative_ai_conversation",
-    "name": "Google Generative AI",
+    "domain": "extended_google_generative_ai_conversation",
+    "name": "Extended Google Generative AI",
     "after_dependencies": ["assist_pipeline", "intent"],
-    "codeowners": ["@tronikos"],
+    "codeowners": ["@tianzhihe"],
     "config_flow": true,
     "dependencies": ["conversation"],
     "documentation": "https://www.home-assistant.io/integrations/google_generative_ai_conversation",
