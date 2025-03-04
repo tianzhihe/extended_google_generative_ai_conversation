@@ -1,8 +1,8 @@
 {
-  "domain": "extended_openai_conversation",
-  "name": "Extended OpenAI Conversation",
+  "domain": "extended_google_generative_ai_conversation",
+  "name": "Extended Google Generative AI Conversation",
   "codeowners": [
-    "@jekalmin"
+    "@tianzhihe"
   ],
   "config_flow": true,
   "dependencies": [
@@ -13,10 +13,9 @@
     "rest",
     "scrape"
   ],
-  "documentation": "https://github.com/jekalmin/extended_openai_conversation",
+  "documentation": "https://github.com/tianzhihe/extended_google_generative_ai_conversation",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/jekalmin/extended_openai_conversation/issues",
   "requirements": [
     "openai~=1.3.8"
   ],
