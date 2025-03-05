@@ -2,7 +2,7 @@
 
 import logging
 
-DOMAIN = "google_generative_ai_conversation"
+DOMAIN = "extended_google_generative_ai_conversation"
 LOGGER = logging.getLogger(__package__)
 CONF_PROMPT = "prompt"
 
