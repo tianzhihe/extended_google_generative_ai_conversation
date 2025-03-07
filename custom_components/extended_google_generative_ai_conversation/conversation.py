@@ -345,6 +345,14 @@ class GoogleGenerativeAIConversationEntity(
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
+        # logs the intent and ensures that we included the tools 
+        # (if for some reason tools were optional, you might programmatically ensure they’re added when these keywords appear)
+        user_text = user_input.text.lower()
+        if "automation" in user_text and "add" in user_text:
+            LOGGER.debug("User is requesting an automation; tool call likely needed.")
+        if "energy" in user_text:
+            LOGGER.debug("User is requesting energy stats; tool call likely needed.")
+
         # If an LLM API is set and it has available tools, 
         # transforms them via _format_tool into the Gemini-compatible Tool structure.
         tools: list[Tool | Callable[..., Any]] | None = None
