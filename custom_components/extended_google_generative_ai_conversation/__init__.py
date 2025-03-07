@@ -7,11 +7,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from google import genai  # type: ignore[attr-defined]
-from google.genai.errors import APIError, ClientError
-from requests.exceptions import Timeout
-import voluptuous as vol
+from google.genai.errors import APIError, ClientError 
+from requests.exceptions import Timeout # handle request timeouts.
+import voluptuous as vol # a data validation library often used by Home Assistant.
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry # Home Assistant’s internal classes and types for its component/integration infrastructure.
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.core import (
     HomeAssistant,
@@ -23,12 +23,13 @@ from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
     ConfigEntryNotReady,
-    HomeAssistantError,
+    HomeAssistantError, #  a general exception base class for Home Assistant.
 )
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
+from homeassistant.helpers import config_validation as cv # assists with validating user or configuration data.
+from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue  # create warnings or issues for the user in the Home Assistant interface.
 from homeassistant.helpers.typing import ConfigType
 
+# Local Constants for configuration and defaults.
 from .const import (
     CONF_CHAT_MODEL,
     CONF_PROMPT,
@@ -41,7 +42,9 @@ SERVICE_GENERATE_CONTENT = "generate_content"
 CONF_IMAGE_FILENAME = "image_filename"
 CONF_FILENAMES = "filenames"
 
+# A schema definition indicating that configuration can only be set up through Home Assistant’s config entries for this domain 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+# Lists the Home Assistant platforms used by this integration. Here, the only platform is Platform.CONVERSATION, which enables conversation features.
 PLATFORMS = (Platform.CONVERSATION,)
 
 type GoogleGenerativeAIConfigEntry = ConfigEntry[genai.Client]
