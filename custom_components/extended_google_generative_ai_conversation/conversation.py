@@ -353,6 +353,36 @@ class GoogleGenerativeAIConversationEntity(
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
                 for tool in chat_log.llm_api.tools
             ]
+        
+        # Append the new Home Assistant tools
+        tools += [
+            Tool(function_declarations=[
+                FunctionDeclaration(
+                    name="add_automation",
+                    description="Add a new Home Assistant automation from a YAML configuration.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "automation_config": {
+                                "type": "string",
+                                "description": "YAML for the new automation"
+                            }
+                        },
+                        "required": ["automation_config"]
+                    }
+                ),
+                FunctionDeclaration(
+                    name="get_energy",
+                    description="Get current energy usage statistics from Home Assistant’s energy manager.",
+                    parameters={
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                )
+            ])
+        ]
+
 
         # Chooses which model to use (user-chosen or recommended).
         model_name = self.entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
@@ -441,7 +471,7 @@ class GoogleGenerativeAIConversationEntity(
                     ),
                 ),
             ],
-            tools=tools or None,
+            tools=tools,
             system_instruction=prompt if supports_system_instruction else None,
             # Disables automatic function calling so that the conversation flow is controlled 
             # by the integration (though tools can still be called within the conversation loop).
