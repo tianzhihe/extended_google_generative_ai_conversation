@@ -1,4 +1,4 @@
-"""Conversation support for the Google Generative AI Conversation integration."""
+"""Conversation support for the Extended Google Generative AI Conversation integration."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import codecs
 from collections.abc import Callable
 from typing import Any, Literal, cast
 
+# imports types and classes from google.genai for AI interactions.
 from google.genai.errors import APIError
 from google.genai.types import (
     AutomaticFunctionCallingConfig,
@@ -53,9 +54,12 @@ from .const import (
 )
 
 # Max number of back and forth with the LLM to generate a response
+# Sets a limit on how many times the conversation agent can repeatedly call tools to generate a single response.
 MAX_TOOL_ITERATIONS = 10
 
 
+# Creates an instance of GoogleGenerativeAIConversationEntity with the provided config entry, 
+# and registers it (via async_add_entities) so Home Assistant recognizes it as a conversation provider.
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -65,7 +69,8 @@ async def async_setup_entry(
     agent = GoogleGenerativeAIConversationEntity(config_entry)
     async_add_entities([agent])
 
-
+# Contains a set of keys recognized by the Gemini API for schema definitions. 
+# Keys outside this list are filtered out when adapting schemas for the AI model.
 SUPPORTED_SCHEMA_KEYS = {
     "min_items",
     "example",
@@ -91,7 +96,7 @@ SUPPORTED_SCHEMA_KEYS = {
     "required",
 }
 
-
+# Goes through each character, inserting an underscore before uppercase letters, then strips leading underscores at the end.
 def _camel_to_snake(name: str) -> str:
     """Convert camel case to snake case."""
     return "".join(["_" + c.lower() if c.isupper() else c for c in name]).lstrip("_")
@@ -142,18 +147,19 @@ def _format_schema(schema: dict[str, Any]) -> Schema:
 
     if result.get("type") == "OBJECT" and not result.get("properties"):
         # An object with undefined properties is not supported by Gemini API.
-        # Fallback to JSON string. This will probably fail for most tools that want it,
-        # but we don't have a better fallback strategy so far.
+        # Fallback to JSON string. This will probably fail for most tools that want it
+        # (but we don't have a better fallback strategy so far.)
         result["properties"] = {"json": {"type": "STRING"}}
         result["required"] = []
-    return cast(Schema, result)
+    return cast(Schema, result) # Returns a Schema object in a format that the Gemini API can handle for function/tool parameters.
 
-
+# Prepares a Home Assistant llm.Tool for use with the Gemini API.
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> Tool:
     """Format tool specification."""
 
+    # Converts the tool’s parameter schema to a Gemini-compatible schema using _format_schema, if a schema is present.
     if tool.parameters.schema:
         parameters = _format_schema(
             convert(tool.parameters, custom_serializer=custom_serializer)
@@ -161,6 +167,8 @@ def _format_tool(
     else:
         parameters = None
 
+    # Builds a Tool object with a single FunctionDeclaration. 
+    # The AI service can then call the tool using these declared parameters.
     return Tool(
         function_declarations=[
             FunctionDeclaration(
@@ -171,7 +179,7 @@ def _format_tool(
         ]
     )
 
-
+# Safely handles certain escaped string characters in nested data structures (strings, lists, dictionaries) by decoding them.
 def _escape_decode(value: Any) -> Any:
     """Recursively call codecs.escape_decode on all values."""
     if isinstance(value, str):
@@ -182,27 +190,29 @@ def _escape_decode(value: Any) -> Any:
         return {k: _escape_decode(v) for k, v in value.items()}
     return value
 
-
+# Constructs a Content object that represents the AI’s use of a “tool result” (i.e., a response or outcome from a tool/function call).
 def _create_google_tool_response_content(
     content: list[conversation.ToolResultContent],
-) -> Content:
+) -> Content:vv
     """Create a Google tool response content."""
     return Content(
         parts=[
             Part.from_function_response(
-                name=tool_result.tool_name, response=tool_result.tool_result
+                name=tool_result.tool_name, response=tool_result.tool_result # map each tool result into a Part, storing the name and response in Gemini’s recognized format.
             )
-            for tool_result in content
+            for tool_result in content # Wraps these parts in a single Content object, which the Generative AI model can interpret as a function response.
         ]
     )
 
-
+# Translates Home Assistant conversation.*Content objects into Gemini-compatible Content.
 def _convert_content(
     content: conversation.UserContent
     | conversation.AssistantContent
     | conversation.SystemContent,
 ) -> Content:
     """Convert HA content to Google content."""
+    
+    # If the content isn’t from the “assistant” role or has no tool calls, it simply puts the text into a Part and sets the Gemini role accordingly.
     if content.role != "assistant" or not content.tool_calls:  # type: ignore[union-attr]
         role = "model" if content.role == "assistant" else content.role
         return Content(
@@ -212,13 +222,17 @@ def _convert_content(
             ],
         )
 
+    # If it’s truly assistant content with tool calls:
+    # 
     # Handle the Assistant content with tool calls.
     assert type(content) is conversation.AssistantContent
     parts: list[Part] = []
 
+    # Adds a Part for any text from the assistant (content.content).
     if content.content:
         parts.append(Part.from_text(text=content.content))
 
+    # Adds a Part for each tool call using Part.from_function_call.
     if content.tool_calls:
         parts.extend(
             [
@@ -230,9 +244,10 @@ def _convert_content(
             ]
         )
 
+    # Marks the role as "model", which is how Gemini recognizes AI/assistant output.
     return Content(role="model", parts=parts)
 
-
+#  This class acts as a Home Assistant conversation “entity,” managing user interactions with the Generative AI model.
 class GoogleGenerativeAIConversationEntity(
     conversation.ConversationEntity, conversation.AbstractConversationAgent
 ):
