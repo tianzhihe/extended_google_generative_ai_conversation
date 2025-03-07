@@ -41,6 +41,8 @@ from .const import (
 SERVICE_GENERATE_CONTENT = "generate_content"
 CONF_IMAGE_FILENAME = "image_filename"
 CONF_FILENAMES = "filenames"
+SERVICE_ADD_AUTOMATION = "add_automation"
+SERVICE_GET_ENERGY = "get_energy"
 
 # A schema definition indicating that configuration can only be set up through Home Assistant’s config entries for this domain 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -173,6 +175,54 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+async def add_automation_service(call: ServiceCall) -> ServiceResponse:
+    """Handle the add_automation service call."""
+    yaml_str = call.data["automation_config"]
+    try:
+        # Parse YAML string to dict
+        automation_config = yaml.safe_load(yaml_str)
+    except Exception as err:
+        raise HomeAssistantError(f"Invalid YAML: {err}") 
+    # Validate and add the automation (similar to conversation tool logic)
+    config = {"id": str(round(time.time() * 1000))}  # generate a unique ID
+    if isinstance(automation_config, list):
+        config.update(automation_config[0])
+    elif isinstance(automation_config, dict):
+        config.update(automation_config)
+    # Validate the automation configuration structure
+    await _async_validate_config_item(hass, config, full_config=True, raise_on_errors=True)
+    # Append to automations YAML and reload
+    automations_path = os.path.join(hass.config.config_dir, AUTOMATION_CONFIG_PATH)
+    current = []
+    if os.path.exists(automations_path):
+        current = yaml.safe_load(open(automations_path, "r")) or []
+    current.append(config)
+    with open(automations_path, "w", encoding="utf-8") as f:
+        yaml.dump(current, f, allow_unicode=True, sort_keys=False)
+    # Reload automations to apply the new one
+    await hass.services.async_call("automation", "reload", {})
+    # Return a success result
+    return {"result": "success", "id": config.get("id")}  # include the new automation ID
+
+# register these in async_setup (or async_setup_entry after obtaining an API client) with schemas
+hass.services.async_register(
+    DOMAIN, SERVICE_ADD_AUTOMATION, add_automation_service,
+    schema=vol.Schema({ vol.Required("automation_config"): cv.string }),
+    supports_response=SupportsResponse.ONLY
+)
+
+async def get_energy_service(call: ServiceCall) -> ServiceResponse:
+    """Handle the get_energy service call."""
+    energy_manager = await hass.helpers.energy.async_get_manager(hass)
+    data = energy_manager.data  # get energy stats data structure
+    return {"result": data}
+
+hass.services.async_register(
+    DOMAIN, SERVICE_GET_ENERGY, get_energy_service,
+    schema=vol.Schema({}),  # no inputs
+    supports_response=SupportsResponse.ONLY
+)
 
 # Manages unloading and cleanup when the user or system removes or disables the integration’s config entry.
 async def async_unload_entry(
