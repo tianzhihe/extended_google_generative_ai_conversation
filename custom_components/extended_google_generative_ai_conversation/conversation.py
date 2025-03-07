@@ -258,9 +258,15 @@ class GoogleGenerativeAIConversationEntity(
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the agent."""
+
+        # Stores the config_entry and retrieves the AI client from its runtime data.
         self.entry = entry
         self._genai_client = entry.runtime_data
+
+        # Sets a unique ID for device tracking within Home Assistant.
         self._attr_unique_id = entry.entry_id
+
+        # Creates device_info that identifies this agent as a service from Google.
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
@@ -268,44 +274,59 @@ class GoogleGenerativeAIConversationEntity(
             model="Generative AI",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
+
+        # If the user has set an LLM Control API (CONF_LLM_HASS_API), 
+        # then this entity declares the CONTROL feature, which helps indicate it can run advanced conversation tasks.
         if self.entry.options.get(CONF_LLM_HASS_API):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
 
+    # Declares that this entity supports all languages, so Home Assistant won’t limit language usage.
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
         """Return a list of supported languages."""
         return MATCH_ALL
 
+    #  Called when Home Assistant has added this entity to the system.
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
+        # ensure conversation handling is updated if needed.
         assist_pipeline.async_migrate_engine(
             self.hass, "conversation", self.entry.entry_id, self.entity_id
         )
+        # Registers this entity as the conversation agent in the conversation component.
         conversation.async_set_agent(self.hass, self.entry, self)
+        # Sets up a listener for entry updates, so if the user changes config options, the entity can reload them.
         self.entry.async_on_unload(
             self.entry.add_update_listener(self._async_entry_update_listener)
         )
 
+    # Ensures this agent is de-registered from Home Assistant’s conversation system 
+    # when the entity is removed (for example, if the integration is uninstalled or disabled).
     async def async_will_remove_from_hass(self) -> None:
         """When entity will be removed from Home Assistant."""
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
 
+    #  Main entry point when Home Assistant wants to process user input through this AI agent.
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
         """Process a sentence."""
         with (
+            # Acquires a chat session associated with the conversation_id, creating one if needed.
             chat_session.async_get_chat_session(
                 self.hass, user_input.conversation_id
             ) as session,
+            # Retrieves or creates a chat_log to record the conversation.
             conversation.async_get_chat_log(self.hass, session, user_input) as chat_log,
         ):
+            # Delegates to self._async_handle_message for the actual AI request.
             return await self._async_handle_message(user_input, chat_log)
 
+    # Performs the heavy lifting of generating an AI response and possibly calling tools/functions.
     async def _async_handle_message(
         self,
         user_input: conversation.ConversationInput,
@@ -315,6 +336,7 @@ class GoogleGenerativeAIConversationEntity(
         options = self.entry.options
 
         try:
+            # Informs the conversation log about the chosen LLM settings (API, prompt, etc.)
             await chat_log.async_update_llm_data(
                 DOMAIN,
                 user_input,
@@ -324,6 +346,8 @@ class GoogleGenerativeAIConversationEntity(
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
+        # If an LLM API is set and it has available tools, 
+        # transforms them via _format_tool into the Gemini-compatible Tool structure.
         tools: list[Tool | Callable[..., Any]] | None = None
         if chat_log.llm_api:
             tools = [
@@ -331,6 +355,7 @@ class GoogleGenerativeAIConversationEntity(
                 for tool in chat_log.llm_api.tools
             ]
 
+        # Chooses which model to use (user-chosen or recommended).
         model_name = self.entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
         # Gemini 1.0 doesn't support system_instruction while 1.5 does.
         # Assume future versions will support it (if not, the request fails with a
@@ -339,6 +364,7 @@ class GoogleGenerativeAIConversationEntity(
             "gemini-1.0" not in model_name and "gemini-pro" not in model_name
         )
 
+        # The first element in chat_log.content is assumed to be the “system” prompt that orients the conversation.
         prompt_content = cast(
             conversation.SystemContent,
             chat_log.content[0],
@@ -354,6 +380,7 @@ class GoogleGenerativeAIConversationEntity(
         # Google groups tool results, we do not. Group them before sending.
         tool_results: list[conversation.ToolResultContent] = []
 
+        # Non-tool results are converted via _convert_content to the Gemini Content format.
         for chat_content in chat_log.content[1:-1]:
             if chat_content.role == "tool_result":
                 # mypy doesn't like picking a type based on checking shared property 'role'
@@ -381,11 +408,13 @@ class GoogleGenerativeAIConversationEntity(
             temperature=self.entry.options.get(
                 CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
             ),
+            # Collects user or default options for AI generation, such as temperature, token limits, etc.
             top_k=self.entry.options.get(CONF_TOP_K, RECOMMENDED_TOP_K),
             top_p=self.entry.options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
             max_output_tokens=self.entry.options.get(
                 CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
             ),
+            # Lists safety settings (Hate speech, harassment, etc.) based on user-configured thresholds.
             safety_settings=[
                 SafetySetting(
                     category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -415,17 +444,22 @@ class GoogleGenerativeAIConversationEntity(
             ],
             tools=tools or None,
             system_instruction=prompt if supports_system_instruction else None,
+            # Disables automatic function calling so that the conversation flow is controlled 
+            # by the integration (though tools can still be called within the conversation loop).
             automatic_function_calling=AutomaticFunctionCallingConfig(
                 disable=True, maximum_remote_calls=None
             ),
         )
 
+        # For older models that cannot take a system_instruction, 
+        # inserts the prompt as if it were user text, followed by a model acknowledgement.
         if not supports_system_instruction:
             messages = [
                 Content(role="user", parts=[Part.from_text(text=prompt)]),
                 Content(role="model", parts=[Part.from_text(text="Ok")]),
                 *messages,
             ]
+        # Creates a new chat session with the configured model and a conversation history.
         chat = self._genai_client.aio.chats.create(
             model=model_name, history=messages, config=generateContentConfig
         )
@@ -435,6 +469,7 @@ class GoogleGenerativeAIConversationEntity(
             try:
                 chat_response = await chat.send_message(message=chat_request)
 
+                # Checks if the response is blocked by safety filters
                 if chat_response.prompt_feedback:
                     raise HomeAssistantError(
                         f"The message got blocked due to content violations, reason: {chat_response.prompt_feedback.block_reason_message}"
@@ -457,6 +492,7 @@ class GoogleGenerativeAIConversationEntity(
                 [part.text.strip() for part in response_parts if part.text]
             )
 
+            # Collects any function calls in the response (tool_calls).
             tool_calls = []
             for part in response_parts:
                 if not part.function_call:
@@ -468,6 +504,8 @@ class GoogleGenerativeAIConversationEntity(
                     llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
                 )
 
+            # If function calls are present, the code re-invokes the model with the tool responses as a new message. 
+            # This loop allows for “multi-turn” usage of the tools.
             chat_request = _create_google_tool_response_content(
                 [
                     tool_response
@@ -481,17 +519,21 @@ class GoogleGenerativeAIConversationEntity(
                 ]
             )
 
+            # Exits once no more tool calls remain or the iteration limit is hit
             if not tool_calls:
                 break
 
+        # Creates a final Home Assistant intent response, populating it with the AI’s text output.
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_speech(
             " ".join([part.text.strip() for part in response_parts if part.text])
         )
+        # Returns this result to the user.
         return conversation.ConversationResult(
             response=response, conversation_id=chat_log.conversation_id
         )
 
+    # React to any updates in the config entry options (e.g., user changes the model or safety thresholds).
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
     ) -> None:
