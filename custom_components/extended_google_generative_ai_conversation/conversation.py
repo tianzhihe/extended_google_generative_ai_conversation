@@ -541,6 +541,8 @@ class GoogleGenerativeAIConversationEntity(
                 tool_calls.append(
                     llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
                 )
+                LOGGER.info("Google Gemini: Detected request for %s function call", tool_name)
+                LOGGER.info("Google Gemini: Executed %s -> Result: %s", tool_name, tool_result)
 
             # If function calls are present, the code re-invokes the model with the tool responses as a new message. 
             # This loop allows for “multi-turn” usage of the tools.
