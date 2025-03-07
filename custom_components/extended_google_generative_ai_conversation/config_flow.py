@@ -123,7 +123,7 @@ class GoogleGenerativeAIConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                 # Otherwise, a new entry is created with a default title (“Google Extended Generative AI”) and prefilled recommended options.
                 return self.async_create_entry(
-                    title="Google Extended Generative AI",
+                    title="Google Generative AI",
                     data=user_input,
                     options=RECOMMENDED_OPTIONS,
                 )
