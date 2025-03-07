@@ -67,23 +67,7 @@
             "example": "/config/www/image.jpg"
           }
         }
-      },
-        "add_automation": {
-            "name": "Add Automation",
-            "description": "Creates a new Home Assistant automation from a YAML configuration provided by the AI or user.",
-            "fields": {
-                "automation_config": {
-                    "name": "Automation YAML",
-                    "description": "The YAML definition of the automation to add. This should include triggers, conditions, and actions.",
-                    "example": "alias: Turn on lights at sunset\ntrigger:\n  - platform: sun\n    event: sunset\naction:\n  - service: light.turn_on\n    target:\n      entity_id: light.living_room\n"
-                }
-            }
-        },
-        "get_energy": {
-            "name": "Get Energy Stats",
-            "description": "Retrieves current energy usage statistics from the Energy dashboard.",
-            "fields": {}
-        }
+      }
     },
     "issues": {
       "deprecated_image_filename_parameter": {
