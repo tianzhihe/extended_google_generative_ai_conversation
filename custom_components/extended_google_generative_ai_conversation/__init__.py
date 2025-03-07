@@ -176,7 +176,7 @@ async def async_setup_entry(
 
     return True
 
-async def add_automation_service(call: ServiceCall) -> ServiceResponse:
+async def add_automation_service(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
     """Handle the add_automation service call."""
     yaml_str = call.data["automation_config"]
     try:
@@ -204,25 +204,24 @@ async def add_automation_service(call: ServiceCall) -> ServiceResponse:
     await hass.services.async_call("automation", "reload", {})
     # Return a success result
     return {"result": "success", "id": config.get("id")}  # include the new automation ID
+    # register these in async_setup (or async_setup_entry after obtaining an API client) with schemas
+    hass.services.async_register(
+        DOMAIN, SERVICE_ADD_AUTOMATION, add_automation_service,
+        schema=vol.Schema({ vol.Required("automation_config"): cv.string }),
+        supports_response=SupportsResponse.ONLY
+    )
 
-# register these in async_setup (or async_setup_entry after obtaining an API client) with schemas
-hass.services.async_register(
-    DOMAIN, SERVICE_ADD_AUTOMATION, add_automation_service,
-    schema=vol.Schema({ vol.Required("automation_config"): cv.string }),
-    supports_response=SupportsResponse.ONLY
-)
-
-async def get_energy_service(call: ServiceCall) -> ServiceResponse:
+async def get_energy_service(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
     """Handle the get_energy service call."""
     energy_manager = await hass.helpers.energy.async_get_manager(hass)
     data = energy_manager.data  # get energy stats data structure
     return {"result": data}
-
-hass.services.async_register(
-    DOMAIN, SERVICE_GET_ENERGY, get_energy_service,
-    schema=vol.Schema({}),  # no inputs
-    supports_response=SupportsResponse.ONLY
-)
+    
+    hass.services.async_register(
+        DOMAIN, SERVICE_GET_ENERGY, get_energy_service,
+        schema=vol.Schema({}),  # no inputs
+        supports_response=SupportsResponse.ONLY
+    )
 
 # Manages unloading and cleanup when the user or system removes or disables the integration’s config entry.
 async def async_unload_entry(
