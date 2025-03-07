@@ -1,7 +1,9 @@
 """The Extended Google Generative AI Conversation Integration."""
 
+# enable postponed evaluation of annotations
 from __future__ import annotations
 
+# for filesystem path handling.
 from pathlib import Path
 
 from google import genai  # type: ignore[attr-defined]
