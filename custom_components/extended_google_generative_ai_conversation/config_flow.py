@@ -319,6 +319,8 @@ async def google_generative_ai_config_option_schema(
     # Those fields are appended to the original schema.
     schema.update(
         {
+            vol.Optional("enable_add_automation", default=True): bool,
+            vol.Optional("enable_get_energy", default=True): bool,
             vol.Optional(
                 CONF_CHAT_MODEL,
                 description={"suggested_value": options.get(CONF_CHAT_MODEL)},
