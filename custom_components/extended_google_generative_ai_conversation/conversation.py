@@ -348,6 +348,7 @@ class GoogleGenerativeAIConversationEntity(
         # If an LLM API is set and it has available tools, 
         # transforms them via _format_tool into the Gemini-compatible Tool structure.
         tools: list[Tool | Callable[..., Any]] | None = None
+        
         if chat_log.llm_api:
             tools = [
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
