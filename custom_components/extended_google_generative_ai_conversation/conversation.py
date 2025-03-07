@@ -382,11 +382,32 @@ class GoogleGenerativeAIConversationEntity(
                 ),
                 FunctionDeclaration(
                     name="get_energy",
-                    description="Get current energy usage statistics from Home Assistant’s energy manager.",
+                    description="Retrieve energy usage statistics from Home Assistant's energy manager for a specified time period.",
                     parameters={
                         "type": "object",
-                        "properties": {},
-                        "required": []
+                        "properties": {
+                            "start_time": {
+                                "type": "string",
+                                "description": "The start datetime in ISO format (YYYY-MM-DDTHH:MM:SSZ)."
+                            },
+                            "end_time": {
+                                "type": "string",
+                                "description": "The end datetime in ISO format (YYYY-MM-DDTHH:MM:SSZ)."
+                            },
+                            "statistic_ids": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "description": "The list of statistic IDs to retrieve."
+                                }
+                            },
+                            "period": {
+                                "type": "string",
+                                "description": "The aggregation period for the statistics.",
+                                "enum": ["day", "week", "month"]
+                            }
+                        },
+                        "required": ["start_time", "end_time", "statistic_ids", "period"]
                     }
                 )
             ])
