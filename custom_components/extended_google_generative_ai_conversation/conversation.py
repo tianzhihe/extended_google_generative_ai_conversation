@@ -345,14 +345,6 @@ class GoogleGenerativeAIConversationEntity(
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
-        # logs the intent and ensures that we included the tools 
-        # (if for some reason tools were optional, you might programmatically ensure they’re added when these keywords appear)
-        user_text = user_input.text.lower()
-        if "automation" in user_text and "add" in user_text:
-            LOGGER.debug("User is requesting an automation; tool call likely needed.")
-        if "energy" in user_text:
-            LOGGER.debug("User is requesting energy stats; tool call likely needed.")
-
         # If an LLM API is set and it has available tools, 
         # transforms them via _format_tool into the Gemini-compatible Tool structure.
         tools: list[Tool | Callable[..., Any]] | None = None
@@ -362,57 +354,6 @@ class GoogleGenerativeAIConversationEntity(
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
                 for tool in chat_log.llm_api.tools
             ]
-        
-        # Append the new Home Assistant tools
-        tools += [
-            Tool(function_declarations=[
-                FunctionDeclaration(
-                    name="add_automation",
-                    description="Add a new Home Assistant automation from a YAML configuration.",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "automation_config": {
-                                "type": "string",
-                                "description": "YAML for the new automation"
-                            }
-                        },
-                        "required": ["automation_config"]
-                    }
-                ),
-                FunctionDeclaration(
-                    name="get_energy",
-                    description="Retrieve energy usage statistics from Home Assistant's energy manager for a specified time period.",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "start_time": {
-                                "type": "string",
-                                "description": "The start datetime in ISO format (YYYY-MM-DDTHH:MM:SSZ)."
-                            },
-                            "end_time": {
-                                "type": "string",
-                                "description": "The end datetime in ISO format (YYYY-MM-DDTHH:MM:SSZ)."
-                            },
-                            "statistic_ids": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string",
-                                    "description": "The list of statistic IDs to retrieve."
-                                }
-                            },
-                            "period": {
-                                "type": "string",
-                                "description": "The aggregation period for the statistics.",
-                                "enum": ["day", "week", "month"]
-                            }
-                        },
-                        "required": ["start_time", "end_time", "statistic_ids", "period"]
-                    }
-                )
-            ])
-        ]
-
 
         # Chooses which model to use (user-chosen or recommended).
         model_name = self.entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
