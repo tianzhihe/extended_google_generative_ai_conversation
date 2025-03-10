@@ -41,8 +41,8 @@ DEFAULT_CONF_BASE_URL = "https://ai.google.dev/gemini-api/docs"
 # CONF_SKIP_AUTHENTICATION = "skip_authentication"
 # DEFAULT_SKIP_AUTHENTICATION = False
 
-EVENT_AUTOMATION_REGISTERED = "automation_registered_via_extended_openai_conversation"
-EVENT_CONVERSATION_FINISHED = "extended_openai_conversation.conversation.finished"
+EVENT_AUTOMATION_REGISTERED = "automation_registered_via_extended_googleai_conversation"
+EVENT_CONVERSATION_FINISHED = "extended_googleai_conversation.conversation.finished"
 
 CONF_PROMPT = "prompt"
 DEFAULT_PROMPT = """I want you to act as smart home manager of Home Assistant.
