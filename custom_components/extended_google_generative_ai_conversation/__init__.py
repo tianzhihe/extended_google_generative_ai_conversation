@@ -38,12 +38,6 @@ from .const import (
     TIMEOUT_MILLIS,
 )
 
-from .helpers import (
-    get_function_executor,
-    is_azure,
-    validate_authentication,
-)
-
 SERVICE_GENERATE_CONTENT = "generate_content"
 CONF_IMAGE_FILENAME = "image_filename"
 CONF_FILENAMES = "filenames"
