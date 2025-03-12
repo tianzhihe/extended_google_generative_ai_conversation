@@ -8,6 +8,8 @@ import logging
 from types import MappingProxyType
 from typing import Any
 
+import yaml
+
 from google import genai  # type: ignore[attr-defined]
 from google.genai.errors import APIError, ClientError
 from requests.exceptions import Timeout
