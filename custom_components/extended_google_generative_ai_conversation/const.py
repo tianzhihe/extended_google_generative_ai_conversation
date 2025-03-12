@@ -66,9 +66,9 @@ Do not restate or appreciate what user says, rather make a quick inquiry.
 # DEFAULT_TOP_P = 1
 # CONF_TEMPERATURE = "temperature"
 # DEFAULT_TEMPERATURE = 0.5
-# CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION = "max_function_calls_per_conversation"
-# DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION = 1
-# CONF_FUNCTIONS = "functions"
+CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION = "max_function_calls_per_conversation"
+DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION = 1
+CONF_FUNCTIONS = "functions"
 DEFAULT_CONF_FUNCTIONS = [
     {
         "spec": {
