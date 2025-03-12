@@ -193,7 +193,7 @@ def _escape_decode(value: Any) -> Any:
 # Constructs a Content object that represents the AI’s use of a “tool result” (i.e., a response or outcome from a tool/function call).
 def _create_google_tool_response_content(
     content: list[conversation.ToolResultContent],
-) -> Content:vv
+) -> Content:
     """Create a Google tool response content."""
     return Content(
         parts=[
