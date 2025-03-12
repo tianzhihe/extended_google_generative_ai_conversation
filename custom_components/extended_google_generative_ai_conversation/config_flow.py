@@ -13,6 +13,8 @@ from google.genai.errors import APIError, ClientError
 from requests.exceptions import Timeout
 import voluptuous as vol
 
+import yaml
+
 from homeassistant.config_entries import (
     SOURCE_REAUTH,
     ConfigEntry,
@@ -54,6 +56,10 @@ from .const import (
     RECOMMENDED_TOP_K,
     RECOMMENDED_TOP_P,
     TIMEOUT_MILLIS,
+    CONF_FUNCTIONS,
+    DEFAULT_CONF_FUNCTIONS,
+    CONF_USE_TOOLS,
+    DEFAULT_USE_TOOLS,
 )
 
 _LOGGER = logging.getLogger(__name__)
