@@ -12,7 +12,7 @@ from requests.exceptions import Timeout # handle request timeouts.
 import voluptuous as vol # a data validation library often used by Home Assistant.
 
 from homeassistant.config_entries import ConfigEntry # Home Assistant’s internal classes and types for its component/integration infrastructure.
-from homeassistant.const import CONF_API_KEY, Platform
+from homeassistant.const import ATTR_NAME, CONF_API_KEY, Platform, MATCH_ALL
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -28,6 +28,11 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import config_validation as cv # assists with validating user or configuration data.
 from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue  # create warnings or issues for the user in the Home Assistant interface.
 from homeassistant.helpers.typing import ConfigType
+
+# Helpers for checking if entities should be exposed (async_should_expose).
+from homeassistant.components.homeassistant.exposed_entities import async_should_expose
+
+
 
 # Local Constants for configuration and defaults.
 from .const import (
