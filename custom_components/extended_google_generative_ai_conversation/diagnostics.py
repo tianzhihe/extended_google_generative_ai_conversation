@@ -12,11 +12,6 @@ from homeassistant.core import HomeAssistant
 
 TO_REDACT = {CONF_API_KEY}
 
-# maintain a simple in-memory record each time a function is called: in the service handlers or conversation tool execution, increment a counter or store the timestamp. 
-hass.data.setdefault(DOMAIN, {})
-hass.data[DOMAIN]["last_add_automation"] = {"time": time.time(), "yaml_length": len(yaml_str)}
-
-
 # Called by Home Assistant whenever a user or system process requests diagnostic information for this config entry.
 # provides a single function that Home Assistant uses to safely expose diagnostic information about the integration. 
 # It ensures that sensitive data (like API keys) is masked, preserving user privacy and maintaining secure handling of secrets.
