@@ -365,7 +365,7 @@ class GoogleGenerativeAIConversationEntity(
             # function_data = yaml.safe_load(function_definitions) if function_definitions else None
             # Or adapt if you store them in a different format
 
-        except not function_definitions:
+        if not function_definitions:
             return []
         # Example: each entry in function_definitions is a dict with "spec" and "function"
         results = []
