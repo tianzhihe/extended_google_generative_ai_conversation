@@ -51,6 +51,10 @@ from .const import (
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_K,
     RECOMMENDED_TOP_P,
+    CONF_FUNCTIONS,
+    DEFAULT_CONF_FUNCTIONS,
+    CONF_USE_TOOLS,
+    DEFAULT_USE_TOOLS,
 )
 
 from .exceptions import (
