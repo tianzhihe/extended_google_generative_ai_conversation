@@ -357,38 +357,26 @@ class GoogleGenerativeAIConversationEntity(
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
 
-    async def get_functions(self) -> list[dict[str, Any]]:
-        """Return a list of function specs and their corresponding executors."""
+    # Loads a list of function definitions from YAML or uses defaults. 
+    # Passes each definition to a function executor helper that refines or converts the data. 
+    # Handles any errors by raising custom exceptions.
+    async def get_functions(self):
         try:
-            function_definitions = self.entry.options.get("functions")
-            # If 'functions' is stored as YAML in your integration:
-            # function_data = yaml.safe_load(function_definitions) if function_definitions else None
-            # Or adapt if you store them in a different format
-
-        if not function_definitions:
-            return []
-        # Example: each entry in function_definitions is a dict with "spec" and "function"
-        results = []
-        for setting in function_definitions:
-            # Convert or validate each function entry
-            function_spec = setting["spec"]
-            # Optionally transform the function definition to arguments
-            # based on your existing logic
-            function_executor = get_function_executor(setting["function"]["type"])
-            typed_function_data = function_executor.to_arguments(setting["function"])
-            results.append(
-                {
-                    "spec": function_spec,
-                    "function": typed_function_data,
-                }
-            )
-        return results
-        except (FunctionNotFound) as e:
+            function = self.entry.options.get(CONF_FUNCTIONS)
+            result = yaml.safe_load(function) if function else DEFAULT_CONF_FUNCTIONS
+            if result:
+                for setting in result:
+                    function_executor = get_function_executor(
+                        setting["function"]["type"]
+                    )
+                    setting["function"] = function_executor.to_arguments(
+                        setting["function"]
+                    )
+            return result
+        except (InvalidFunction, FunctionNotFound) as e:
             raise e
-        except Exception as e:
-            # Replace with a more specific error if desired
-            raise HomeAssistantError(f"Failed to load function definitions: {e}") from e
-
+        except:
+            raise FunctionLoadFailed()
     
     #  Main entry point when Home Assistant wants to process user input through this AI agent.
     async def async_process(
