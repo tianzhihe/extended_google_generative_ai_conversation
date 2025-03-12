@@ -36,19 +36,14 @@ from homeassistant.helpers.selector import (
 #  Several constants imported from .const that will be used when constructing the flow and building default values.
 from .const import (
     CONF_CHAT_MODEL,
-    CONF_DANGEROUS_BLOCK_THRESHOLD,
-    CONF_HARASSMENT_BLOCK_THRESHOLD,
-    CONF_HATE_BLOCK_THRESHOLD,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
     CONF_RECOMMENDED,
-    CONF_SEXUAL_BLOCK_THRESHOLD,
     CONF_TEMPERATURE,
     CONF_TOP_K,
     CONF_TOP_P,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
-    RECOMMENDED_HARM_BLOCK_THRESHOLD,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_K,
@@ -292,35 +287,9 @@ async def google_generative_ai_config_option_schema(
     ]
 
     # The user can then pick a model, specify text-generation parameters like temperature, top_p, top_k, and set thresholds to block harmful content.
-    harm_block_thresholds: list[SelectOptionDict] = [
-        SelectOptionDict(
-            label="Block none",
-            value="BLOCK_NONE",
-        ),
-        SelectOptionDict(
-            label="Block few",
-            value="BLOCK_ONLY_HIGH",
-        ),
-        SelectOptionDict(
-            label="Block some",
-            value="BLOCK_MEDIUM_AND_ABOVE",
-        ),
-        SelectOptionDict(
-            label="Block most",
-            value="BLOCK_LOW_AND_ABOVE",
-        ),
-    ]
-    harm_block_thresholds_selector = SelectSelector(
-        SelectSelectorConfig(
-            mode=SelectSelectorMode.DROPDOWN, options=harm_block_thresholds
-        )
-    )
-
     # Those fields are appended to the original schema.
     schema.update(
         {
-            vol.Optional("enable_add_automation", default=True): bool,
-            vol.Optional("enable_get_energy", default=True): bool,
             vol.Optional(
                 CONF_CHAT_MODEL,
                 description={"suggested_value": options.get(CONF_CHAT_MODEL)},
@@ -348,32 +317,6 @@ async def google_generative_ai_config_option_schema(
                 description={"suggested_value": options.get(CONF_MAX_TOKENS)},
                 default=RECOMMENDED_MAX_TOKENS,
             ): int,
-            vol.Optional(
-                CONF_HARASSMENT_BLOCK_THRESHOLD,
-                description={
-                    "suggested_value": options.get(CONF_HARASSMENT_BLOCK_THRESHOLD)
-                },
-                default=RECOMMENDED_HARM_BLOCK_THRESHOLD,
-            ): harm_block_thresholds_selector,
-            vol.Optional(
-                CONF_HATE_BLOCK_THRESHOLD,
-                description={"suggested_value": options.get(CONF_HATE_BLOCK_THRESHOLD)},
-                default=RECOMMENDED_HARM_BLOCK_THRESHOLD,
-            ): harm_block_thresholds_selector,
-            vol.Optional(
-                CONF_SEXUAL_BLOCK_THRESHOLD,
-                description={
-                    "suggested_value": options.get(CONF_SEXUAL_BLOCK_THRESHOLD)
-                },
-                default=RECOMMENDED_HARM_BLOCK_THRESHOLD,
-            ): harm_block_thresholds_selector,
-            vol.Optional(
-                CONF_DANGEROUS_BLOCK_THRESHOLD,
-                description={
-                    "suggested_value": options.get(CONF_DANGEROUS_BLOCK_THRESHOLD)
-                },
-                default=RECOMMENDED_HARM_BLOCK_THRESHOLD,
-            ): harm_block_thresholds_selector,
         }
     )
     return schema
