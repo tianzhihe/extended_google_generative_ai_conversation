@@ -34,19 +34,14 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
     CONF_CHAT_MODEL,
-    CONF_DANGEROUS_BLOCK_THRESHOLD,
-    CONF_HARASSMENT_BLOCK_THRESHOLD,
-    CONF_HATE_BLOCK_THRESHOLD,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
-    CONF_SEXUAL_BLOCK_THRESHOLD,
     CONF_TEMPERATURE,
     CONF_TOP_K,
     CONF_TOP_P,
     DOMAIN,
     LOGGER,
     RECOMMENDED_CHAT_MODEL,
-    RECOMMENDED_HARM_BLOCK_THRESHOLD,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_K,
@@ -460,34 +455,6 @@ class GoogleGenerativeAIConversationEntity(
             max_output_tokens=self.entry.options.get(
                 CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
             ),
-            # Lists safety settings (Hate speech, harassment, etc.) based on user-configured thresholds.
-            safety_settings=[
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=self.entry.options.get(
-                        CONF_HATE_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD
-                    ),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=self.entry.options.get(
-                        CONF_HARASSMENT_BLOCK_THRESHOLD,
-                        RECOMMENDED_HARM_BLOCK_THRESHOLD,
-                    ),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=self.entry.options.get(
-                        CONF_DANGEROUS_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD
-                    ),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=self.entry.options.get(
-                        CONF_SEXUAL_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD
-                    ),
-                ),
-            ],
             tools=tools,
             system_instruction=prompt if supports_system_instruction else None,
             # Disables automatic function calling so that the conversation flow is controlled 
@@ -514,13 +481,6 @@ class GoogleGenerativeAIConversationEntity(
         for _iteration in range(MAX_TOOL_ITERATIONS):
             try:
                 chat_response = await chat.send_message(message=chat_request)
-
-                # Checks if the response is blocked by safety filters
-                if chat_response.prompt_feedback:
-                    raise HomeAssistantError(
-                        f"The message got blocked due to content violations, reason: {chat_response.prompt_feedback.block_reason_message}"
-                    )
-
             except (
                 APIError,
                 ValueError,
