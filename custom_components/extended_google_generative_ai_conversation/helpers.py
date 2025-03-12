@@ -35,7 +35,7 @@ from bs4 import BeautifulSoup
 
 # The 'openai' package provides functionalities to interact with OpenAI services.
 # Here we import asynchronous classes for Azure OpenAI and OpenAI usage.
-from openai import AsyncAzureOpenAI, AsyncOpenAI
+# from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 # 'voluptuous' (vol) is a Python data validation library used to define schemas and validate data.
 import voluptuous as vol
@@ -194,34 +194,34 @@ def _get_rest_data(hass, rest_config, arguments):
 
 # Validates the provided OpenAI or Azure OpenAI credentials by attempting to list available models.
 # If skip_authentication is True, the check is bypassed.
-async def validate_authentication(
-    hass: HomeAssistant,
-    api_key: str,
-    base_url: str,
-    api_version: str,
-    organization: str = None,
-    skip_authentication=False,
-) -> None:
-    if skip_authentication:
-        return
-
-    if is_azure(base_url):
-        client = AsyncAzureOpenAI(
-            api_key=api_key,
-            azure_endpoint=base_url,
-            api_version=api_version,
-            organization=organization,
-            http_client=get_async_client(hass),
-        )
-    else:
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            organization=organization,
-            http_client=get_async_client(hass),
-        )
-
-    await hass.async_add_executor_job(partial(client.models.list, timeout=10))
+# async def validate_authentication(
+#    hass: HomeAssistant,
+#    api_key: str,
+#    base_url: str,
+#    api_version: str,
+#    organization: str = None,
+#    skip_authentication=False,
+#) -> None:
+#    if skip_authentication:
+#        return
+#
+#    if is_azure(base_url):
+#        client = AsyncAzureOpenAI(
+#            api_key=api_key,
+#            azure_endpoint=base_url,
+#            api_version=api_version,
+#            organization=organization,
+#            http_client=get_async_client(hass),
+#        )
+#    else:
+#        client = AsyncOpenAI(
+#            api_key=api_key,
+#            base_url=base_url,
+#            organization=organization,
+#            http_client=get_async_client(hass),
+#        )
+#
+#    await hass.async_add_executor_job(partial(client.models.list, timeout=10))
 
 # Abstract base class for function executors. 
 # Each executor must define the 'execute' method.
