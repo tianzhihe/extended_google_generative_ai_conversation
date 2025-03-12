@@ -49,7 +49,13 @@ from .const import (
     RECOMMENDED_TOP_K,
     RECOMMENDED_TOP_P,
     TIMEOUT_MILLIS,
+    DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+    DEFAULT_USE_TOOLS,
+    CONF_USE_TOOLS,
 )
+
+# Dumps a default functions structure (from Python to YAML) so it can be used in the form as the default value.
+DEFAULT_CONF_FUNCTIONS_STR = yaml.dump(DEFAULT_CONF_FUNCTIONS, sort_keys=False)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -317,6 +323,23 @@ async def google_generative_ai_config_option_schema(
                 description={"suggested_value": options.get(CONF_MAX_TOKENS)},
                 default=RECOMMENDED_MAX_TOKENS,
             ): int,
+            vol.Optional(
+                CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+                description={
+                    "suggested_value": options[CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION]
+                },
+                default=DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+            ): int,
+            vol.Optional(
+                CONF_FUNCTIONS,
+                description={"suggested_value": options.get(CONF_FUNCTIONS)},
+                default=DEFAULT_CONF_FUNCTIONS_STR,
+            ): TemplateSelector(),
+            vol.Optional(
+                CONF_USE_TOOLS,
+                description={"suggested_value": options.get(CONF_USE_TOOLS)},
+                default=DEFAULT_USE_TOOLS,
+            ): BooleanSelector()
         }
     )
     return schema
