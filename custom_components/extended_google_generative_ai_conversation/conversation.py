@@ -199,17 +199,57 @@ def _escape_decode(value: Any) -> Any:
     return value
 
 # Constructs a Content object that represents the AI’s use of a “tool result” (i.e., a response or outcome from a tool/function call).
-def _create_google_tool_response_content(
-    content: list[conversation.ToolResultContent],
+# def _create_google_tool_response_content(
+#    content: list[conversation.ToolResultContent],
+# ) -> Content:
+#    return Content(
+#        parts=[
+#            Part.from_function_response(
+#                name=tool_result.tool_name, response=tool_result.tool_result # map each tool result into a Part, storing the name and response in Gemini’s recognized format.
+#            )
+#            for tool_result in content # Wraps these parts in a single Content object, which the Generative AI model can interpret as a function response.
+#        ]
+#    )
+
+
+async def _create_google_tool_response_content(
+    ai_entity: GoogleGenerativeAIConversationEntity,
+    tool_contents: List[conversation.ToolResultContent],
+    user_input: conversation.ConversationInput,
 ) -> Content:
-    return Content(
-        parts=[
-            Part.from_function_response(
-                name=tool_result.tool_name, response=tool_result.tool_result # map each tool result into a Part, storing the name and response in Gemini’s recognized format.
-            )
-            for tool_result in content # Wraps these parts in a single Content object, which the Generative AI model can interpret as a function response.
-        ]
-    )
+    """
+    Constructs a Content object representing the AI’s use of each tool.
+    Also calls `execute_tool_call` to run the tool and fetch the result.
+    
+    :param ai_entity: The GoogleGenerativeAIConversationEntity (your conversation agent).
+    :param tool_contents: A list of ToolResultContent entries, each with tool name/arguments.
+    :param user_input: The conversation input context (for user ID, etc.).
+    :return: A Gemini Content object that aggregates all tool responses.
+    """
+    parts = []
+    for tool_item in tool_contents:
+        # tool_item might have .tool_name, .tool_args, etc.
+        tool_name = tool_item.tool_name
+
+        # If your ToolResultContent already includes arguments to be executed:
+        tool_args_str = tool_item.tool_args  # or whatever field holds the JSON/string
+
+        # Call the tool to generate the result dynamically
+        tool_result = await ai_entity.execute_tool_call(
+            tool_name=tool_name,
+            tool_args_str=tool_args_str,
+            user_input=user_input,
+        )
+
+        # Build a Part recognized by Gemini as a "function response"
+        part = Part.from_function_response(
+            name=tool_name,
+            response=str(tool_result),
+        )
+        parts.append(part)
+
+    # Return a single Content object with all parts.
+    return Content(parts=parts)
 
 # Translates Home Assistant conversation.*Content objects into Gemini-compatible Content.
 def _convert_content(
@@ -476,7 +516,11 @@ class GoogleGenerativeAIConversationEntity(
         chat = self._genai_client.aio.chats.create(
             model=model_name, history=messages, config=generateContentConfig
         )
+
+        
         chat_request: str | Content = user_input.text
+
+        
         # To prevent infinite loops, we limit the number of iterations
         for _iteration in range(MAX_TOOL_ITERATIONS):
             try:
@@ -531,6 +575,55 @@ class GoogleGenerativeAIConversationEntity(
             if not tool_calls:
                 break
 
+        async def execute_tool_call(
+                self,
+                tool_name: str,
+                tool_args_str: str,
+                user_input: conversation.ConversationInput
+            ) -> Any:
+                """
+                Finds and runs the requested tool (function).
+                Returns the result to be appended to conversation messages.
+                """
+                # 1) Locate the matching function in self.get_functions()
+                try:
+                    functions = await self.get_functions()
+                except HomeAssistantError as err:
+                    raise HomeAssistantError(f"Error loading function definitions: {err}") from err
+
+                function_def = next(
+                    (f for f in functions if f["spec"]["name"] == tool_name),
+                    None,
+                )
+                if not function_def:
+                    raise HomeAssistantError(f"Function '{tool_name}' was not found.")
+
+                # 2) Parse the arguments
+                try:
+                    arguments = json.loads(tool_args_str)
+                except json.JSONDecodeError as err:
+                    raise HomeAssistantError(
+                        f"Arguments for tool '{tool_name}' are not valid JSON: {err}"
+                    ) from err
+
+                # 3) Execute the function
+                #    'function_def["function"]' has typed data for the function,
+                #    such as domain, service call, or custom logic.
+                function_executor = get_function_executor(
+                    function_def["function"]["type"]
+                )
+                result = await function_executor.execute(
+                    self.hass,
+                    function_def["function"],
+                    arguments,
+                    user_input,
+                    exposed_entities=None,  # If needed, adapt your code to pass the right entities
+                )
+
+        return result
+
+
+        
         # Creates a final Home Assistant intent response, populating it with the AI’s text output.
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_speech(
