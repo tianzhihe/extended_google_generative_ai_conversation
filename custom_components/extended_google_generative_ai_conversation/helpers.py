@@ -119,7 +119,7 @@ from .exceptions import (
 _LOGGER = logging.getLogger(__name__)
 
 # Regular expression pattern used to detect Azure domain in a URL.
-AZURE_DOMAIN_PATTERN = r"\.(openai\.azure\.com|azure-api\.net)"
+# AZURE_DOMAIN_PATTERN = r"\.(openai\.azure\.com|azure-api\.net)"
 
 # The following function retrieves a function executor from a predefined dictionary.
 # If the requested function type does not exist, it raises a 'FunctionNotFound' error.
@@ -130,10 +130,10 @@ def get_function_executor(value: str):
     return function_executor
 
 # Checks if the provided base_url matches the Azure domain pattern above.
-def is_azure(base_url: str):
-    if base_url and re.search(AZURE_DOMAIN_PATTERN, base_url):
-        return True
-    return False
+# def is_azure(base_url: str):
+#    if base_url and re.search(AZURE_DOMAIN_PATTERN, base_url):
+#        return True
+#    return False
 
 # Converts certain keys in a dictionary or list structure into Home Assistant Templates,
 # if they match certain template key names. Useful for dynamically rendering fields.
