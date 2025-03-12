@@ -71,6 +71,35 @@ DEFAULT_CONF_FUNCTIONS = [
             },
         },
         "function": {"type": "native", "name": "execute_service"},
+    },
+        {
+        "spec": {
+            "name": "get_energy_statistic_ids",
+            "description": "Get statistics",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dummy": {
+                        "type": "string",
+                        "description": "Nothing",
+                    }
+                },
+            },
+        },
+        "function": {
+            "type": "composite",
+            "sequence": [
+                {
+                    "type": "native",
+                    "name": "get_energy",
+                    "response_variable": "result"
+                },
+                {
+                    "type": "template",
+                    "value_template": "{{result.device_consumption | map(attribute='stat_consumption') | list}}"
+                }
+            ]
+        }
     }
 ]
 
