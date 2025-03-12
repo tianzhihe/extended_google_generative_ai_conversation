@@ -54,6 +54,7 @@ from .const import (
     DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
     DEFAULT_USE_TOOLS,
     CONF_USE_TOOLS,
+    DEFAULT_CONF_FUNCTIONS,
 )
 
 # Dumps a default functions structure (from Python to YAML) so it can be used in the form as the default value.
