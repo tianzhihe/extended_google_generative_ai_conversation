@@ -62,6 +62,9 @@ from .const import (
     DEFAULT_USE_TOOLS,
 )
 
+# Dumps a default functions structure (from Python to YAML) so it can be used in the form as the default value.
+DEFAULT_CONF_FUNCTIONS_STR = yaml.dump(DEFAULT_CONF_FUNCTIONS, sort_keys=False)
+
 _LOGGER = logging.getLogger(__name__)
 
 # Describes the required data for the initial configuration step. Specifically, it requires an api_key from the user.
@@ -378,6 +381,16 @@ async def google_generative_ai_config_option_schema(
                 },
                 default=RECOMMENDED_HARM_BLOCK_THRESHOLD,
             ): harm_block_thresholds_selector,
+            vol.Optional(
+                CONF_FUNCTIONS,
+                description={"suggested_value": options.get(CONF_FUNCTIONS)},
+                default=DEFAULT_CONF_FUNCTIONS_STR,
+            ): TemplateSelector(),
+            vol.Optional(
+                CONF_USE_TOOLS,
+                description={"suggested_value": options.get(CONF_USE_TOOLS)},
+                default=DEFAULT_USE_TOOLS,
+            ): BooleanSelector(),
         }
     )
     return schema
