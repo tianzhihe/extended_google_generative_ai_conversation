@@ -75,7 +75,7 @@ DEFAULT_CONF_FUNCTIONS = [
 ]
 
 CONF_USE_TOOLS = "use_tools"
-
+DEFAULT_USE_TOOLS = True
 
 
 
