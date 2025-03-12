@@ -110,6 +110,6 @@ TIMEOUT_MILLIS = 10000
 
 CONF_PAYLOAD_TEMPLATE = "payload_template"
 
-EVENT_AUTOMATION_REGISTERED = "automation_registered_via_extended_googleai_conversation"
-EVENT_CONVERSATION_FINISHED = "extended_googleai_conversation.conversation.finished"
+EVENT_AUTOMATION_REGISTERED = "automation_registered_via_extended_google_generative_ai_conversation"
+EVENT_CONVERSATION_FINISHED = "extended_google_generative_ai_conversation.conversation.finished"
 
