@@ -33,6 +33,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
     TemplateSelector,
+    BooleanSelector
 )
 
 #  Several constants imported from .const that will be used when constructing the flow and building default values.
