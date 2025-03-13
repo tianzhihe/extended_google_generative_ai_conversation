@@ -326,8 +326,6 @@ class GoogleGenerativeAIConversationEntity(
         except:
             raise FunctionLoadFailed()
 
-    # Get all the functions from the user configuration of functions
-    functions = list(map(lambda s: s["spec"], self.get_functions()))
 
     #  Called when Home Assistant has added this entity to the system.
     async def async_added_to_hass(self) -> None:
@@ -395,6 +393,9 @@ class GoogleGenerativeAIConversationEntity(
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
                 for tool in chat_log.llm_api.tools
             ]
+
+        # Get all the functions from the user configuration of functions
+        functions = list(map(lambda s: s["spec"], self.get_functions()))
 
         # Add the functions to the tools list
         tools.extend(functions)
