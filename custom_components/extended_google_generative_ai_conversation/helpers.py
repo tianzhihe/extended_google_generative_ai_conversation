@@ -35,7 +35,7 @@ from bs4 import BeautifulSoup
 
 # The 'openai' package provides functionalities to interact with OpenAI services.
 # Here we import asynchronous classes for Azure OpenAI and OpenAI usage.
-# from openai import AsyncAzureOpenAI, AsyncOpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 # 'voluptuous' (vol) is a Python data validation library used to define schemas and validate data.
 import voluptuous as vol
@@ -100,12 +100,7 @@ from homeassistant.helpers.template import Template
 import homeassistant.util.dt as dt_util
 
 # These constants and exceptions are specific to the custom integration or module:
-from .const import (
-  CONF_PAYLOAD_TEMPLATE, 
-  DOMAIN, 
-  EVENT_AUTOMATION_REGISTERED
-)
-
+from .const import CONF_PAYLOAD_TEMPLATE, DOMAIN, EVENT_AUTOMATION_REGISTERED
 from .exceptions import (
     CallServiceError,
     EntityNotExposed,
@@ -119,7 +114,7 @@ from .exceptions import (
 _LOGGER = logging.getLogger(__name__)
 
 # Regular expression pattern used to detect Azure domain in a URL.
-# AZURE_DOMAIN_PATTERN = r"\.(openai\.azure\.com|azure-api\.net)"
+AZURE_DOMAIN_PATTERN = r"\.(openai\.azure\.com|azure-api\.net)"
 
 # The following function retrieves a function executor from a predefined dictionary.
 # If the requested function type does not exist, it raises a 'FunctionNotFound' error.
@@ -130,10 +125,10 @@ def get_function_executor(value: str):
     return function_executor
 
 # Checks if the provided base_url matches the Azure domain pattern above.
-# def is_azure(base_url: str):
-#    if base_url and re.search(AZURE_DOMAIN_PATTERN, base_url):
-#        return True
-#    return False
+def is_azure(base_url: str):
+    if base_url and re.search(AZURE_DOMAIN_PATTERN, base_url):
+        return True
+    return False
 
 # Converts certain keys in a dictionary or list structure into Home Assistant Templates,
 # if they match certain template key names. Useful for dynamically rendering fields.
@@ -194,34 +189,34 @@ def _get_rest_data(hass, rest_config, arguments):
 
 # Validates the provided OpenAI or Azure OpenAI credentials by attempting to list available models.
 # If skip_authentication is True, the check is bypassed.
-# async def validate_authentication(
-#    hass: HomeAssistant,
-#    api_key: str,
-#    base_url: str,
-#    api_version: str,
-#    organization: str = None,
-#    skip_authentication=False,
-#) -> None:
-#    if skip_authentication:
-#        return
-#
-#    if is_azure(base_url):
-#        client = AsyncAzureOpenAI(
-#            api_key=api_key,
-#            azure_endpoint=base_url,
-#            api_version=api_version,
-#            organization=organization,
-#            http_client=get_async_client(hass),
-#        )
-#    else:
-#        client = AsyncOpenAI(
-#            api_key=api_key,
-#            base_url=base_url,
-#            organization=organization,
-#            http_client=get_async_client(hass),
-#        )
-#
-#    await hass.async_add_executor_job(partial(client.models.list, timeout=10))
+async def validate_authentication(
+    hass: HomeAssistant,
+    api_key: str,
+    base_url: str,
+    api_version: str,
+    organization: str = None,
+    skip_authentication=False,
+) -> None:
+    if skip_authentication:
+        return
+
+    if is_azure(base_url):
+        client = AsyncAzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=base_url,
+            api_version=api_version,
+            organization=organization,
+            http_client=get_async_client(hass),
+        )
+    else:
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            organization=organization,
+            http_client=get_async_client(hass),
+        )
+
+    await hass.async_add_executor_job(partial(client.models.list, timeout=10))
 
 # Abstract base class for function executors. 
 # Each executor must define the 'execute' method.
