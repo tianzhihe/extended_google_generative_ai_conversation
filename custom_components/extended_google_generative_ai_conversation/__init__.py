@@ -1,7 +1,8 @@
-"""The Extended Google Generative AI Conversation Integration."""
-"""A Google Generative AI Conversation integration, rewritten to match the structure of Code 2."""
-
 from __future__ import annotations
+
+"""The Extended Google Generative AI Conversation Integration."""
+"""A Google Generative AI Conversation integration, rewritten to match the structure of extended OpenAI."""
+
 
 import codecs
 import json
