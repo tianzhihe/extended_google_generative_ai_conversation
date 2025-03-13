@@ -451,13 +451,15 @@ class GoogleGenerativeAIConversationEntity(
                 break
 
             # Otherwise, record the assistant's text + the tool calls
-            combined_parts = await chat_log.async_add_assistant_content(
+            combined_parts = []
+            async for part in chat_log.async_add_assistant_content(
                 conversation.AssistantContent(
                     agent_id=user_input.agent_id,
                     content=resp_content,
                     tool_calls=found_tool_calls,
                 )
-            )
+            ):
+                combined_parts.append(part)
 
             # Execute each tool call and gather results
             tool_result_contents: list[conversation.ToolResultContent] = []
