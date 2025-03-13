@@ -442,7 +442,12 @@ class GoogleGenerativeAIConversationEntity(
 
             # If no tool calls, we're done
             if not found_tool_calls:
-                await chat_log.async_add_assistant_message(resp_content)
+                await chat_log.async_add_assistant_content(
+                    conversation.AssistantContent(
+                        agent_id=user_input.agent_id,
+                        content=resp_content,
+                    )
+                )
                 break
 
             # Otherwise, record the assistant's text + the tool calls
