@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Conversation support for the Extended Google Generative AI Conversation integration."""
 
 """
@@ -5,7 +7,6 @@ Revised version of the Google Generative AI Conversation integration
 with a structure similar to Code 2's function-call handling approach.
 """
 
-from __future__ import annotations
 
 import codecs
 from collections.abc import Callable
