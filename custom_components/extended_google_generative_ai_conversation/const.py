@@ -1,35 +1,46 @@
-"""Constants for the Google Generative AI Conversation integration."""
+"""Constants for the Extended Google AI Conversation integration."""
 
-import logging
+DOMAIN = "extended_googleai_conversation"
+DEFAULT_NAME = "Extended OpenAI Conversation"
+CONF_ORGANIZATION = "organization"
+CONF_BASE_URL = "base_url"
+DEFAULT_CONF_BASE_URL = "https://api.openai.com/v1"
+CONF_API_VERSION = "api_version"
+CONF_SKIP_AUTHENTICATION = "skip_authentication"
+DEFAULT_SKIP_AUTHENTICATION = False
 
-# This serves as the unique identifier for the entire integration within Home Assistant. 
-# Any services, configuration entries, or logs associated with this integration are tracked under this string.
-DOMAIN = "extended_google_generative_ai_conversation"
+EVENT_AUTOMATION_REGISTERED = "automation_registered_via_extended_openai_conversation"
+EVENT_CONVERSATION_FINISHED = "extended_openai_conversation.conversation.finished"
 
-# A standard Python logger associated with the current package. 
-# It makes it possible to log messages that relate specifically to this integration.
-LOGGER = logging.getLogger(__package__)
-
-# A configuration key representing the text prompt that the user wants to send to the Generative AI model.
 CONF_PROMPT = "prompt"
+DEFAULT_PROMPT = """I want you to act as smart home manager of Home Assistant.
+I will provide information of smart home along with a question, you will truthfully make correction or answer using information provided in one sentence in everyday language.
 
-CONF_RECOMMENDED = "recommended"
+Current Time: {{now()}}
+
+Available Devices:
+```csv
+entity_id,name,state,aliases
+{% for entity in exposed_entities -%}
+{{ entity.entity_id }},{{ entity.name }},{{ entity.state }},{{entity.aliases | join('/')}}
+{% endfor -%}
+```
+
+The current state of devices is provided in available devices.
+Use execute_services function only for requested action, not for current states.
+Do not execute service without user's confirmation.
+Do not restate or appreciate what user says, rather make a quick inquiry.
+"""
 CONF_CHAT_MODEL = "chat_model"
-RECOMMENDED_CHAT_MODEL = "models/gemini-2.0-flash"
-CONF_TEMPERATURE = "temperature"
-RECOMMENDED_TEMPERATURE = 1.0
-CONF_TOP_P = "top_p"
-RECOMMENDED_TOP_P = 0.95
-CONF_TOP_K = "top_k"
-RECOMMENDED_TOP_K = 64
+DEFAULT_CHAT_MODEL = "gpt-4o-mini"
 CONF_MAX_TOKENS = "max_tokens"
-RECOMMENDED_MAX_TOKENS = 200
-CONF_HARASSMENT_BLOCK_THRESHOLD = "harassment_block_threshold"
-CONF_HATE_BLOCK_THRESHOLD = "hate_block_threshold"
-CONF_SEXUAL_BLOCK_THRESHOLD = "sexual_block_threshold"
-CONF_DANGEROUS_BLOCK_THRESHOLD = "dangerous_block_threshold"
-RECOMMENDED_HARM_BLOCK_THRESHOLD = "BLOCK_MEDIUM_AND_ABOVE"
-
+DEFAULT_MAX_TOKENS = 150
+CONF_TOP_P = "top_p"
+DEFAULT_TOP_P = 1
+CONF_TEMPERATURE = "temperature"
+DEFAULT_TEMPERATURE = 0.5
+CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION = "max_function_calls_per_conversation"
+DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION = 1
 CONF_FUNCTIONS = "functions"
 DEFAULT_CONF_FUNCTIONS = [
     {
@@ -71,46 +82,18 @@ DEFAULT_CONF_FUNCTIONS = [
             },
         },
         "function": {"type": "native", "name": "execute_service"},
-    },
-        {
-        "spec": {
-            "name": "get_energy_statistic_ids",
-            "description": "Get statistics",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "dummy": {
-                        "type": "string",
-                        "description": "Nothing",
-                    }
-                },
-            },
-        },
-        "function": {
-            "type": "composite",
-            "sequence": [
-                {
-                    "type": "native",
-                    "name": "get_energy",
-                    "response_variable": "result"
-                },
-                {
-                    "type": "template",
-                    "value_template": "{{result.device_consumption | map(attribute='stat_consumption') | list}}"
-                }
-            ]
-        }
     }
 ]
-
+CONF_ATTACH_USERNAME = "attach_username"
+DEFAULT_ATTACH_USERNAME = False
 CONF_USE_TOOLS = "use_tools"
-DEFAULT_USE_TOOLS = True
+DEFAULT_USE_TOOLS = False
+CONF_CONTEXT_THRESHOLD = "context_threshold"
+DEFAULT_CONTEXT_THRESHOLD = 13000
+CONTEXT_TRUNCATE_STRATEGIES = [{"key": "clear", "label": "Clear All Messages"}]
+CONF_CONTEXT_TRUNCATE_STRATEGY = "context_truncate_strategy"
+DEFAULT_CONTEXT_TRUNCATE_STRATEGY = CONTEXT_TRUNCATE_STRATEGIES[0]["key"]
 
-TIMEOUT_MILLIS = 10000
+SERVICE_QUERY_IMAGE = "query_image"
 
 CONF_PAYLOAD_TEMPLATE = "payload_template"
-
-EVENT_AUTOMATION_REGISTERED = "automation_registered_via_extended_google_generative_ai_conversation"
-EVENT_CONVERSATION_FINISHED = "extended_google_generative_ai_conversation.conversation.finished"
-
-MAX_TOOL_ITERATIONS = 10
