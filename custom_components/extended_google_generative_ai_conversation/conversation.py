@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-"""Conversation support for the Extended Google Generative AI Conversation integration."""
-
 """
-Revised version of the Google Generative AI Conversation integration
-with a structure similar to Code 2's function-call handling approach.
+Google Generative AI Conversation integration
+with support for function definitions that specify OpenAPI-like schemas.
 """
 
 
@@ -26,7 +24,6 @@ from google.genai.types import (
     Schema,
     Tool,
 )
-
 from voluptuous_openapi import convert
 
 from homeassistant.components import assist_pipeline, conversation
@@ -77,6 +74,7 @@ from .helpers import (
     get_function_executor
 )
 
+# Max number of iterations for repeated tool calls
 MAX_TOOL_ITERATIONS = 10
 
 async def async_setup_entry(
@@ -118,7 +116,7 @@ def _camel_to_snake(name: str) -> str:
     return "".join(["_" + c.lower() if c.isupper() else c for c in name]).lstrip("_")
 
 def _format_schema(schema: dict[str, Any]) -> Schema:
-    """Format the schema to be compatible with Gemini API."""
+    """Adapt OpenAPI-like schema to something Gemini will accept."""
     if subschemas := schema.get("allOf"):
         for subschema in subschemas:
             if "type" in subschema:
@@ -135,6 +133,7 @@ def _format_schema(schema: dict[str, Any]) -> Schema:
         elif key == "type":
             val = val.upper()
         elif key == "format":
+            # Filter out unsupported formats
             if schema.get("type") == "string" and val not in ("enum", "date-time"):
                 continue
             if schema.get("type") == "number" and val not in ("float", "double"):
@@ -154,6 +153,7 @@ def _format_schema(schema: dict[str, Any]) -> Schema:
         result["enum"] = [str(item) for item in result["enum"]]
 
     if result.get("type") == "OBJECT" and not result.get("properties"):
+        # Gemini doesn't handle open-ended objects well. Fallback to a JSON string.
         result["properties"] = {"json": {"type": "STRING"}}
         result["required"] = []
     return cast(Schema, result)
@@ -161,7 +161,7 @@ def _format_schema(schema: dict[str, Any]) -> Schema:
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> Tool:
-    """Format tool specification."""
+    """Format a Home Assistant llm.Tool into a Gemini Tool."""
     if tool.parameters.schema:
         parameters = _format_schema(
             convert(tool.parameters, custom_serializer=custom_serializer)
@@ -180,7 +180,7 @@ def _format_tool(
     )
 
 def _escape_decode(value: Any) -> Any:
-    """Recursively call codecs.escape_decode on all values."""
+    """Recursively handle escaped sequences in strings."""
     if isinstance(value, str):
         return codecs.escape_decode(bytes(value, "utf-8"))[0].decode("utf-8")
     if isinstance(value, list):
@@ -192,7 +192,7 @@ def _escape_decode(value: Any) -> Any:
 def _create_google_tool_response_content(
     content: list[conversation.ToolResultContent],
 ) -> Content:
-    """Create a Google tool response content."""
+    """Create a Content object from tool results."""
     return Content(
         parts=[
             Part.from_function_response(
@@ -208,8 +208,11 @@ def _convert_content(
     | conversation.AssistantContent
     | conversation.SystemContent,
 ) -> Content:
-    """Convert HA content to Google content."""
-    if content.role != "assistant" or not content.tool_calls:  # type: ignore[union-attr]
+    """
+    Convert Home Assistant conversation content into
+    a format suitable for Google Generative AI.
+    """
+    if content.role != "assistant" or not content.tool_calls:
         role = "model" if content.role == "assistant" else content.role
         return Content(
             role=role,
@@ -218,20 +221,18 @@ def _convert_content(
             ],
         )
 
+    # We have assistant content with tool calls
     assert type(content) is conversation.AssistantContent
     parts: list[Part] = []
     if content.content:
         parts.append(Part.from_text(text=content.content))
 
-    if content.tool_calls:
-        parts.extend(
-            [
-                Part.from_function_call(
-                    name=tool_call.tool_name,
-                    args=_escape_decode(tool_call.tool_args),
-                )
-                for tool_call in content.tool_calls
-            ]
+    for tool_call in content.tool_calls:
+        parts.append(
+            Part.from_function_call(
+                name=tool_call.tool_name,
+                args=_escape_decode(tool_call.tool_args),
+            )
         )
 
     return Content(role="model", parts=parts)
@@ -239,7 +240,7 @@ def _convert_content(
 class GoogleGenerativeAIConversationEntity(
     conversation.ConversationEntity, conversation.AbstractConversationAgent
 ):
-    """Google Generative AI conversation agent with refactored function-calling structure."""
+    """Google Generative AI conversation agent."""
 
     _attr_has_entity_name = True
     _attr_name = None
@@ -263,26 +264,27 @@ class GoogleGenerativeAIConversationEntity(
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
-        """Return a list of supported languages."""
+        """Return the list of supported languages."""
         return MATCH_ALL
 
     def get_functions(self):
-        """Load user-defined or default functions."""
+        """Load function definitions from YAML or defaults, for example usage."""
         try:
             function_str = self.entry.options.get(CONF_FUNCTIONS)
             result = yaml.safe_load(function_str) if function_str else DEFAULT_CONF_FUNCTIONS
             if result:
                 for setting in result:
                     func_exec = get_function_executor(setting["function"]["type"])
+                    # Convert the function block so we can run it later
                     setting["function"] = func_exec.to_arguments(setting["function"])
             return result
         except (InvalidFunction, FunctionNotFound) as err:
             raise err
-        except Exception as err:
-            raise FunctionLoadFailed() from err
+        except Exception:
+            raise FunctionLoadFailed()
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to Home Assistant."""
+        """Run when entity is added to Home Assistant."""
         await super().async_added_to_hass()
         assist_pipeline.async_migrate_engine(
             self.hass, "conversation", self.entry.entry_id, self.entity_id
@@ -293,14 +295,14 @@ class GoogleGenerativeAIConversationEntity(
         )
 
     async def async_will_remove_from_hass(self) -> None:
-        """When entity will be removed from Home Assistant."""
+        """Run when entity is removed from Home Assistant."""
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
 
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
-        """Process a sentence from the user."""
+        """Process user input."""
         with (
             chat_session.async_get_chat_session(
                 self.hass, user_input.conversation_id
@@ -314,7 +316,7 @@ class GoogleGenerativeAIConversationEntity(
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
     ) -> conversation.ConversationResult:
-        """Handle the AI request using a loop that checks for function calls."""
+        """Handle the conversation with possible function calls."""
         options = self.entry.options
         try:
             await chat_log.async_update_llm_data(
@@ -326,6 +328,7 @@ class GoogleGenerativeAIConversationEntity(
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
+        # Convert HA llm.Tools to Google Tools
         tools: list[Tool | Callable[..., Any]] | None = None
         if chat_log.llm_api:
             tools = [
@@ -333,30 +336,27 @@ class GoogleGenerativeAIConversationEntity(
                 for tool in chat_log.llm_api.tools
             ]
 
-        # Add user-defined functions as "tools"
+        # Now read your YAML-based function definitions and convert them into Tools
         user_functions = self.get_functions() or []
-        if user_functions:
-            # Each item in user_functions is { "spec": {...}, "function": {...} } from load
-            # but for the Google client, we only pass the "spec" as a Tool
-            # We'll assume "spec" has the structure for a single function
-            # or we can generate a Tool from it if needed
-            for fn_def in user_functions:
-                # Some direct mapping from "spec" to Tool is possible
-                if "name" in fn_def["spec"]:
-                    # Minimal usage: create a Tool with the same name
-                    # For advanced usage, you'd adapt parameters
-                    fn_tool = Tool(
-                        function_declarations=[
-                            FunctionDeclaration(
-                                name=fn_def["spec"]["name"],
-                                description=fn_def["spec"].get("description", ""),
-                                parameters=None,
-                            )
-                        ]
+        for fn_def in user_functions:
+            spec = fn_def["spec"]
+            # If 'parameters' is present, translate it using _format_schema
+            schema_obj = None
+            if "parameters" in spec:
+                schema_obj = _format_schema(spec["parameters"])
+
+            fn_tool = Tool(
+                function_declarations=[
+                    FunctionDeclaration(
+                        name=spec["name"],
+                        description=spec.get("description", ""),
+                        parameters=schema_obj,
                     )
-                    if tools is None:
-                        tools = []
-                    tools.append(fn_tool)
+                ]
+            )
+            if tools is None:
+                tools = []
+            tools.append(fn_tool)
 
         model_name = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
         supports_system_instruction = (
@@ -367,15 +367,15 @@ class GoogleGenerativeAIConversationEntity(
             conversation.SystemContent,
             chat_log.content[0],
         )
-        if prompt_content.content:
-            prompt = prompt_content.content
-        else:
+        if not prompt_content.content:
             raise HomeAssistantError("Invalid prompt content")
+
+        prompt = prompt_content.content
 
         messages: list[Content] = []
         tool_results: list[conversation.ToolResultContent] = []
 
-        # Convert chat_log content except the final user request
+        # Convert prior conversation content into Gemini Content
         for chat_content in chat_log.content[1:-1]:
             if chat_content.role == "tool_result":
                 tool_results.append(cast(conversation.ToolResultContent, chat_content))
@@ -388,7 +388,6 @@ class GoogleGenerativeAIConversationEntity(
         if tool_results:
             messages.append(_create_google_tool_response_content(tool_results))
 
-        # Configuration for Generative AI calls
         generate_config = GenerateContentConfig(
             temperature=options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
             top_k=options.get(CONF_TOP_K, RECOMMENDED_TOP_K),
@@ -420,7 +419,7 @@ class GoogleGenerativeAIConversationEntity(
             ),
         )
 
-        # For models that don't allow system_instruction, prepend the prompt as a user message
+        # For older models that don't allow system_instruction, prepend prompt
         if not supports_system_instruction:
             messages = [
                 Content(role="user", parts=[Part.from_text(text=prompt)]),
@@ -428,11 +427,9 @@ class GoogleGenerativeAIConversationEntity(
                 *messages,
             ]
 
-        # Begin conversation with new message from user
         chat_request: str | Content = user_input.text
-
+        resp_content = ""
         for _ in range(MAX_TOOL_ITERATIONS):
-            # Query the model with user text or tool responses
             resp_content, found_tool_calls = await self._query_model(
                 messages=messages,
                 message_input=chat_request,
@@ -440,32 +437,24 @@ class GoogleGenerativeAIConversationEntity(
                 config=generate_config,
             )
 
-            # If a safety block or other error occurred, raise
             if resp_content is None:
-                raise HomeAssistantError("Content blocked by safety settings or error occurred.")
+                raise HomeAssistantError("Prompt blocked or empty response from Generative AI.")
 
-            # If no tool calls returned, break out
+            # If no tool calls, we're done
             if not found_tool_calls:
-                # Add final assistant content to chat log
                 await chat_log.async_add_assistant_message(resp_content)
                 break
 
-            # Otherwise, handle tool calls
-            # We store assistant text plus calls in the chat log, gather tool results, and send them back
-            combined_response = []
-            for item in await chat_log.async_add_assistant_content(
+            # Otherwise, record the assistant's text + the tool calls
+            combined_parts = await chat_log.async_add_assistant_content(
                 conversation.AssistantContent(
                     agent_id=user_input.agent_id,
                     content=resp_content,
-                    tool_calls=[
-                        llm.ToolInput(tool_name=tool_call.tool_name, tool_args=_escape_decode(tool_call.tool_args))
-                        for tool_call in found_tool_calls
-                    ],
+                    tool_calls=found_tool_calls,
                 )
-            ):
-                combined_response.append(item)
+            )
 
-            # Execute each found tool call, gather results
+            # Execute each tool call and gather results
             tool_result_contents: list[conversation.ToolResultContent] = []
             for call in found_tool_calls:
                 result = await self._execute_function_call(call)
@@ -476,12 +465,11 @@ class GoogleGenerativeAIConversationEntity(
                     )
                 )
 
-            # Prepare next iteration's message input from the function call results
+            # Pass function-call outputs back into the model
             chat_request = _create_google_tool_response_content(tool_result_contents)
 
-        # Build final HA conversation response
         response = intent.IntentResponse(language=user_input.language)
-        response.async_set_speech(resp_content or "")
+        response.async_set_speech(resp_content)
         return conversation.ConversationResult(
             response=response, conversation_id=chat_log.conversation_id
         )
@@ -493,28 +481,22 @@ class GoogleGenerativeAIConversationEntity(
         model: str,
         config: GenerateContentConfig,
     ) -> tuple[str | None, list[llm.ToolInput] | None]:
-        """
-        Send a single query to the Google Generative AI model.
-        Returns a tuple of (assistant_text, list_of_tool_calls).
-        If the response is blocked or error occurs, returns (None, None).
-        """
-        # Create chat object
+        """Send data to Google Generative AI and parse the result."""
         chat = self._genai_client.aio.chats.create(
             model=model,
             history=messages,
             config=config,
         )
-
         try:
             chat_response = await chat.send_message(message=message_input)
         except (APIError, ValueError) as err:
-            LOGGER.error("Error sending message: %s", err)
+            LOGGER.error("Error sending message to Google Generative AI: %s", err)
             raise HomeAssistantError(
-                f"Sorry, I had a problem talking to Google Generative AI: {err}"
+                f"Problem talking to Google Generative AI: {err}"
             ) from err
 
+        # Safety block or empty response
         if chat_response.prompt_feedback:
-            # If the model has blocked the prompt for any reason
             return None, None
 
         response_parts = chat_response.candidates[0].content.parts
@@ -522,7 +504,8 @@ class GoogleGenerativeAIConversationEntity(
             return None, None
 
         assistant_text = " ".join(part.text.strip() for part in response_parts if part.text)
-        # Identify any function/tool calls
+
+        # Find any function calls
         tool_calls: list[llm.ToolInput] = []
         for part in response_parts:
             if part.function_call:
@@ -537,29 +520,41 @@ class GoogleGenerativeAIConversationEntity(
         return assistant_text, tool_calls or None
 
     async def _execute_function_call(self, tool_call: llm.ToolInput) -> str:
-        """Locate and execute a user-defined function."""
-        # Convert the JSON string to an object, then run the matching function
-        user_functions = self.get_functions() or []
+        """
+        Locate and execute a user-defined function by name.
+        Handle composite or native calls.
+        """
+        all_funcs = self.get_functions() or []
         fn_name = tool_call.tool_name
-        for fn_def in user_functions:
+
+        for fn_def in all_funcs:
             if fn_def["spec"]["name"] == fn_name:
+                # For example, either native or composite
                 func_exec = get_function_executor(fn_def["function"]["type"])
                 try:
-                    args = conversation.json_loads(tool_call.tool_args)  # or `json.loads`
+                    # Convert JSON string to dictionary
+                    # If you have logic for partial JSON or other format,
+                    # adapt as needed
+                    from json import loads as json_load
+                    args = json_load(tool_call.tool_args)
                 except ValueError as err:
                     raise ParseArgumentsFailed(tool_call.tool_args) from err
+
+                # Execute via function executor
                 result = await func_exec.execute(
                     self.hass,
                     fn_def["function"],
                     args,
-                    None,  # user_input not always needed
-                    None,  # exposed_entities not always needed
+                    None,  # user_input can be passed if needed
+                    None,  # exposed_entities can be used if needed
                 )
                 return str(result)
+
+        # If no match found
         raise FunctionNotFound(fn_name)
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
     ) -> None:
-        """Handle options update."""
+        """Handle config entry updates."""
         await hass.config_entries.async_reload(entry.entry_id)
