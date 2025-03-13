@@ -213,354 +213,258 @@ def _convert_content(
         role = "model" if content.role == "assistant" else content.role
         return Content(
             role=role,
-            parts=[
-                Part.from_text(text=content.content if content.content else ""),
-            ],
-        )
+            parts=["""Conversation support for Extended Google Generative AI Conversation integration."""
 
-    assert type(content) is conversation.AssistantContent
-    parts: list[Part] = []
-    if content.content:
-        parts.append(Part.from_text(text=content.content))
+from __future__ import annotations
 
-    if content.tool_calls:
-        parts.extend(
-            [
-                Part.from_function_call(
-                    name=tool_call.tool_name,
-                    args=_escape_decode(tool_call.tool_args),
-                )
-                for tool_call in content.tool_calls
-            ]
-        )
+import json
+import logging
+from typing import Any, Literal
 
-    return Content(role="model", parts=parts)
+from google.genai import ChatSession
+from google.genai.types import Content, Part, FunctionDeclaration, Tool
+from homeassistant.components import conversation
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import intent, llm
 
-class GoogleGenerativeAIConversationEntity(
-    conversation.ConversationEntity, conversation.AbstractConversationAgent
-):
-    """Google Generative AI conversation agent with refactored function-calling structure."""
+# Added imports
+from homeassistant.util import ulid
+import voluptuous as vol
 
-    _attr_has_entity_name = True
-    _attr_name = None
+from .const import (
+    CONF_CHAT_MODEL,
+    CONF_MAX_TOKENS,
+    CONF_PROMPT,
+    CONF_TEMPERATURE,
+    CONF_TOP_P,
+    CONF_TOP_K,
+    CONF_FUNCTIONS,
+    CONF_MAX_FUNCTION_CALLS,
+    DEFAULT_MAX_FUNCTION_CALLS,
+    DOMAIN,
+    LOGGER,
+)
+from .exceptions import (
+    FunctionLoadFailed,
+    FunctionNotFound,
+    InvalidFunction,
+    ParseArgumentsFailed,
+)
+from .helpers import get_function_executor
 
-    def __init__(self, entry: ConfigEntry) -> None:
+class GoogleGenerativeAIConversationAgent(conversation.AbstractConversationAgent):
+    """Google Gemini conversation agent with OpenAI-style function calling."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the agent."""
+        self.hass = hass
         self.entry = entry
-        self._genai_client = entry.runtime_data
-        self._attr_unique_id = entry.entry_id
-        self._attr_device_info = dr.DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name=entry.title,
-            manufacturer="Google",
-            model="Generative AI",
-            entry_type=dr.DeviceEntryType.SERVICE,
-        )
-        if self.entry.options.get(CONF_LLM_HASS_API):
-            self._attr_supported_features = (
-                conversation.ConversationEntityFeature.CONTROL
-            )
+        self.client = entry.runtime_data
+        self.history: dict[str, list[dict]] = {}
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
-        """Return a list of supported languages."""
         return MATCH_ALL
-
-    def get_functions(self):
-        """Load user-defined or default functions."""
-        try:
-            function_str = self.entry.options.get(CONF_FUNCTIONS)
-            result = yaml.safe_load(function_str) if function_str else DEFAULT_CONF_FUNCTIONS
-            if result:
-                for setting in result:
-                    func_exec = get_function_executor(setting["function"]["type"])
-                    setting["function"] = func_exec.to_arguments(setting["function"])
-            return result
-        except (InvalidFunction, FunctionNotFound) as err:
-            raise err
-        except Exception as err:
-            raise FunctionLoadFailed() from err
-
-    async def async_added_to_hass(self) -> None:
-        """When entity is added to Home Assistant."""
-        await super().async_added_to_hass()
-        assist_pipeline.async_migrate_engine(
-            self.hass, "conversation", self.entry.entry_id, self.entity_id
-        )
-        conversation.async_set_agent(self.hass, self.entry, self)
-        self.entry.async_on_unload(
-            self.entry.add_update_listener(self._async_entry_update_listener)
-        )
-
-    async def async_will_remove_from_hass(self) -> None:
-        """When entity will be removed from Home Assistant."""
-        conversation.async_unset_agent(self.hass, self.entry)
-        await super().async_will_remove_from_hass()
 
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
-        """Process a sentence from the user."""
-        with (
-            chat_session.async_get_chat_session(
-                self.hass, user_input.conversation_id
-            ) as session,
-            conversation.async_get_chat_log(self.hass, session, user_input) as chat_log,
-        ):
-            return await self._async_handle_message(user_input, chat_log)
+        """Process a conversation input."""
+        conversation_id = user_input.conversation_id or ulid.ulid()
+        messages = self.history.get(conversation_id, [])
 
-    async def _async_handle_message(
+        # Initialize conversation
+        if not messages:
+            messages = [self._create_system_message()]
+            self.history[conversation_id] = messages
+
+        messages.append({"role": "user", "content": user_input.text})
+
+        try:
+            response = await self._execute_conversation(
+                user_input=user_input,
+                messages=messages,
+                conversation_id=conversation_id,
+                n_requests=0
+            )
+        except HomeAssistantError as err:
+            LOGGER.error("Conversation error: %s", err)
+            response = intent.IntentResponse(language=user_input.language)
+            response.async_set_error(str(err))
+            return conversation.ConversationResult(
+                response=response, conversation_id=conversation_id
+            )
+
+        return conversation.ConversationResult(
+            response=response, conversation_id=conversation_id
+        )
+
+    async def _execute_conversation(
         self,
         user_input: conversation.ConversationInput,
-        chat_log: conversation.ChatLog,
-    ) -> conversation.ConversationResult:
-        """Handle the AI request using a loop that checks for function calls."""
-        options = self.entry.options
+        messages: list[dict],
+        conversation_id: str,
+        n_requests: int
+    ) -> intent.IntentResponse:
+        """Execute conversation with function calling support."""
+        if n_requests >= self.entry.options.get(CONF_MAX_FUNCTION_CALLS, DEFAULT_MAX_FUNCTION_CALLS):
+            raise HomeAssistantError("Maximum function calls reached")
+
+        # Generate Gemini-compatible contents
+        contents = [
+            Content(role=msg["role"], parts=[Part.from_text(msg["content"])]
+            for msg in messages if msg["role"] in ("user", "system")
+        ]
+
+        # Add tool definitions
+        tools = self._load_tools()
+        chat = self.client.chat.create(
+            model=self.entry.options[CONF_CHAT_MODEL],
+            contents=contents,
+            tools=tools,
+            config=self._create_generation_config()
+        )
+
         try:
-            await chat_log.async_update_llm_data(
-                DOMAIN,
+            response = await chat.send_message()
+        except APIError as err:
+            raise HomeAssistantError(f"API error: {err}") from err
+
+        # Process response
+        response_message = self._parse_response(response)
+        messages.append(response_message)
+
+        # Handle function calls
+        if "function_call" in response_message:
+            result = await self._execute_function_call(
+                response_message["function_call"],
                 user_input,
-                options.get(CONF_LLM_HASS_API),
-                options.get(CONF_PROMPT),
+                messages,
+                conversation_id,
+                n_requests
             )
-        except conversation.ConverseError as err:
-            return err.as_conversation_result()
-
-        tools: list[Tool | Callable[..., Any]] | None = None
-        if chat_log.llm_api:
-            tools = [
-                _format_tool(tool, chat_log.llm_api.custom_serializer)
-                for tool in chat_log.llm_api.tools
-            ]
-
-        # Add user-defined functions as "tools"
-        user_functions = self.get_functions() or []
-        if user_functions:
-            # Each item in user_functions is { "spec": {...}, "function": {...} } from load
-            # but for the Google client, we only pass the "spec" as a Tool
-            # We'll assume "spec" has the structure for a single function
-            # or we can generate a Tool from it if needed
-            for fn_def in user_functions:
-                # Some direct mapping from "spec" to Tool is possible
-                if "name" in fn_def["spec"]:
-                    # Minimal usage: create a Tool with the same name
-                    # For advanced usage, you'd adapt parameters
-                    fn_tool = Tool(
-                        function_declarations=[
-                            FunctionDeclaration(
-                                name=fn_def["spec"]["name"],
-                                description=fn_def["spec"].get("description", ""),
-                                parameters=None,
-                            )
-                        ]
-                    )
-                    if tools is None:
-                        tools = []
-                    tools.append(fn_tool)
-
-        model_name = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
-        supports_system_instruction = (
-            "gemini-1.0" not in model_name and "gemini-pro" not in model_name
-        )
-
-        prompt_content = cast(
-            conversation.SystemContent,
-            chat_log.content[0],
-        )
-        if prompt_content.content:
-            prompt = prompt_content.content
-        else:
-            raise HomeAssistantError("Invalid prompt content")
-
-        messages: list[Content] = []
-        tool_results: list[conversation.ToolResultContent] = []
-
-        # Convert chat_log content except the final user request
-        for chat_content in chat_log.content[1:-1]:
-            if chat_content.role == "tool_result":
-                tool_results.append(cast(conversation.ToolResultContent, chat_content))
-                continue
-            if tool_results:
-                messages.append(_create_google_tool_response_content(tool_results))
-                tool_results.clear()
-            messages.append(_convert_content(chat_content))
-
-        if tool_results:
-            messages.append(_create_google_tool_response_content(tool_results))
-
-        # Configuration for Generative AI calls
-        generate_config = GenerateContentConfig(
-            temperature=options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
-            top_k=options.get(CONF_TOP_K, RECOMMENDED_TOP_K),
-            top_p=options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
-            max_output_tokens=options.get(CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS),
-            safety_settings=[
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=options.get(CONF_HATE_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=options.get(CONF_HARASSMENT_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=options.get(CONF_DANGEROUS_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=options.get(CONF_SEXUAL_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD),
-                ),
-            ],
-            tools=tools or None,
-            system_instruction=prompt if supports_system_instruction else None,
-            automatic_function_calling=AutomaticFunctionCallingConfig(
-                disable=True,
-                maximum_remote_calls=None
-            ),
-        )
-
-        # For models that don't allow system_instruction, prepend the prompt as a user message
-        if not supports_system_instruction:
-            messages = [
-                Content(role="user", parts=[Part.from_text(text=prompt)]),
-                Content(role="model", parts=[Part.from_text(text="Ok")]),
-                *messages,
-            ]
-
-        # Begin conversation with new message from user
-        chat_request: str | Content = user_input.text
-
-        for _ in range(MAX_TOOL_ITERATIONS):
-            # Query the model with user text or tool responses
-            resp_content, found_tool_calls = await self._query_model(
-                messages=messages,
-                message_input=chat_request,
-                model=model_name,
-                config=generate_config,
+            messages.append(result)
+            return await self._execute_conversation(
+                user_input, messages, conversation_id, n_requests + 1
             )
 
-            # If a safety block or other error occurred, raise
-            if resp_content is None:
-                raise HomeAssistantError("Content blocked by safety settings or error occurred.")
+        return self._create_response(response_message)
 
-            # If no tool calls returned, break out
-            if not found_tool_calls:
-                # Add final assistant content to chat log
-                await chat_log.async_add_assistant_message(resp_content)
-                break
-
-            # Otherwise, handle tool calls
-            # We store assistant text plus calls in the chat log, gather tool results, and send them back
-            combined_response = []
-            for item in await chat_log.async_add_assistant_content(
-                conversation.AssistantContent(
-                    agent_id=user_input.agent_id,
-                    content=resp_content,
-                    tool_calls=[
-                        llm.ToolInput(tool_name=tool_call.tool_name, tool_args=_escape_decode(tool_call.tool_args))
-                        for tool_call in found_tool_calls
-                    ],
-                )
-            ):
-                combined_response.append(item)
-
-            # Execute each found tool call, gather results
-            tool_result_contents: list[conversation.ToolResultContent] = []
-            for call in found_tool_calls:
-                result = await self._execute_function_call(call)
-                tool_result_contents.append(
-                    conversation.ToolResultContent(
-                        tool_name=call.tool_name,
-                        tool_result=result
+    def _load_tools(self) -> list[Tool]:
+        """Load and format tools for Gemini API."""
+        tools = []
+        for func_spec in self._get_functions():
+            tools.append(Tool(
+                function_declarations=[
+                    FunctionDeclaration(
+                        name=func_spec["name"],
+                        description=func_spec["description"],
+                        parameters=self._format_parameters(func_spec["parameters"])
                     )
-                )
+                ]
+            ))
+        return tools
 
-            # Prepare next iteration's message input from the function call results
-            chat_request = _create_google_tool_response_content(tool_result_contents)
-
-        # Build final HA conversation response
-        response = intent.IntentResponse(language=user_input.language)
-        response.async_set_speech(resp_content or "")
-        return conversation.ConversationResult(
-            response=response, conversation_id=chat_log.conversation_id
-        )
-
-    async def _query_model(
-        self,
-        messages: list[Content],
-        message_input: str | Content,
-        model: str,
-        config: GenerateContentConfig,
-    ) -> tuple[str | None, list[llm.ToolInput] | None]:
-        """
-        Send a single query to the Google Generative AI model.
-        Returns a tuple of (assistant_text, list_of_tool_calls).
-        If the response is blocked or error occurs, returns (None, None).
-        """
-        # Create chat object
-        chat = self._genai_client.aio.chats.create(
-            model=model,
-            history=messages,
-            config=config,
-        )
-
+    def _get_functions(self) -> list[dict]:
+        """Load functions from configuration."""
         try:
-            chat_response = await chat.send_message(message=message_input)
-        except (APIError, ValueError) as err:
-            LOGGER.error("Error sending message: %s", err)
-            raise HomeAssistantError(
-                f"Sorry, I had a problem talking to Google Generative AI: {err}"
-            ) from err
+            functions = self.entry.options.get(CONF_FUNCTIONS, [])
+            return [self._validate_function(f) for f in functions]
+        except (vol.Invalid, ValueError) as err:
+            raise FunctionLoadFailed(f"Invalid function configuration: {err}") from err
 
-        if chat_response.prompt_feedback:
-            # If the model has blocked the prompt for any reason
-            return None, None
+    def _validate_function(self, func_config: dict) -> dict:
+        """Validate and format function configuration."""
+        function_executor = get_function_executor(func_config["type"])
+        return function_executor.validate_config(func_config)
 
-        response_parts = chat_response.candidates[0].content.parts
-        if not response_parts:
-            return None, None
+    def _format_parameters(self, parameters: dict) -> dict:
+        """Convert parameters to Gemini format."""
+        # Simplified parameter formatting compared to original
+        return {
+            "type": "OBJECT",
+            "properties": {
+                k: {"type": v["type"].upper(), "description": v.get("description", "")}
+                for k, v in parameters["properties"].items()
+            },
+            "required": parameters.get("required", [])
+        }
 
-        assistant_text = " ".join(part.text.strip() for part in response_parts if part.text)
-        # Identify any function/tool calls
-        tool_calls: list[llm.ToolInput] = []
-        for part in response_parts:
+    async def _execute_function_call(
+        self,
+        function_call: dict,
+        user_input: conversation.ConversationInput,
+        messages: list[dict],
+        conversation_id: str,
+        n_requests: int
+    ) -> dict:
+        """Execute a function call and return result."""
+        func_name = function_call["name"]
+        try:
+            args = json.loads(function_call["arguments"])
+        except json.JSONDecodeError as err:
+            raise ParseArgumentsFailed(function_call["arguments"]) from err
+
+        # Find and execute function
+        func = next(
+            (f for f in self._get_functions() if f["name"] == func_name),
+            None
+        )
+        if not func:
+            raise FunctionNotFound(func_name)
+
+        executor = get_function_executor(func["type"])
+        result = await executor.execute(self.hass, func, args, user_input)
+
+        return {
+            "role": "function",
+            "name": func_name,
+            "content": json.dumps(result),
+        }
+
+    def _create_system_message(self) -> dict:
+        """Create system message from prompt template."""
+        prompt = self.entry.options.get(CONF_PROMPT, "")
+        return {
+            "role": "system",
+            "content": prompt.format(ha_name=self.hass.config.location_name)
+        }
+
+    def _create_generation_config(self) -> dict:
+        """Create generation configuration."""
+        return {
+            "temperature": self.entry.options.get(CONF_TEMPERATURE, 0.5),
+            "top_p": self.entry.options.get(CONF_TOP_P, 0.95),
+            "top_k": self.entry.options.get(CONF_TOP_K, 40),
+            "max_output_tokens": self.entry.options.get(CONF_MAX_TOKENS, 2048)
+        }
+
+    def _parse_response(self, response) -> dict:
+        """Parse Gemini response to message format."""
+        if not response.candidates:
+            raise HomeAssistantError("No response candidates found")
+
+        parts = response.candidates[0].content.parts
+        return {
+            "role": "assistant",
+            "content": " ".join(p.text for p in parts if p.text),
+            "function_call": self._extract_function_call(parts)
+        }
+
+    def _extract_function_call(self, parts: list[Part]) -> dict | None:
+        """Extract function call from response parts."""
+        for part in parts:
             if part.function_call:
-                tool_call = part.function_call
-                tool_calls.append(
-                    llm.ToolInput(
-                        tool_name=tool_call.name,
-                        tool_args=_escape_decode(tool_call.args),
-                    )
-                )
+                return {
+                    "name": part.function_call.name,
+                    "arguments": json.dumps(part.function_call.args)
+                }
+        return None
 
-        return assistant_text, tool_calls or None
-
-    async def _execute_function_call(self, tool_call: llm.ToolInput) -> str:
-        """Locate and execute a user-defined function."""
-        # Convert the JSON string to an object, then run the matching function
-        user_functions = self.get_functions() or []
-        fn_name = tool_call.tool_name
-        for fn_def in user_functions:
-            if fn_def["spec"]["name"] == fn_name:
-                func_exec = get_function_executor(fn_def["function"]["type"])
-                try:
-                    args = conversation.json_loads(tool_call.tool_args)  # or `json.loads`
-                except ValueError as err:
-                    raise ParseArgumentsFailed(tool_call.tool_args) from err
-                result = await func_exec.execute(
-                    self.hass,
-                    fn_def["function"],
-                    args,
-                    None,  # user_input not always needed
-                    None,  # exposed_entities not always needed
-                )
-                return str(result)
-        raise FunctionNotFound(fn_name)
-
-    async def _async_entry_update_listener(
-        self, hass: HomeAssistant, entry: ConfigEntry
-    ) -> None:
-        """Handle options update."""
-        await hass.config_entries.async_reload(entry.entry_id)
-
+    def _create_response(self, message: dict) -> intent.IntentResponse:
+        """Create Home Assistant response."""
+        response = intent.IntentResponse()
+        response.async_set_speech(message["content"])
+        return response
