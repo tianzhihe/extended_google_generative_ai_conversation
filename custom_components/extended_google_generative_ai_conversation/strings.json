@@ -1,79 +1,72 @@
 {
-    "config": {
-      "step": {
-        "api": {
-          "data": {
-            "api_key": "[%key:common::config_flow::data::api_key%]"
-          },
-          "description": "Get your API key from [here]({api_key_url})."
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "name": "[%key:common::config_flow::data::name%]",
+          "api_key": "[%key:common::config_flow::data::api_key%]",
+          "base_url": "[%key:common::config_flow::data::base_url%]",
+          "api_version": "[%key:common::config_flow::data::api_version%]",
+          "organization": "[%key:common::config_flow::data::organization%]",
+          "skip_authentication": "[%key:common::config_flow::data::skip_authentication%]"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "prompt": "Prompt Template",
+          "model": "Completion Model",
+          "max_tokens": "Maximum tokens to return in response",
+          "temperature": "Temperature",
+          "top_p": "Top P",
+          "max_function_calls_per_conversation": "Maximum function calls per conversation",
+          "functions": "Functions",
+          "attach_username": "Attach Username to Message",
+          "use_tools": "Use Tools",
+          "context_threshold": "Context Threshold",
+          "context_truncate_strategy": "Context truncation strategy when exceeded threshold"
+        }
+      }
+    }
+  },
+  "services": {
+    "query_image": {
+      "name": "Query image",
+      "description": "Take in images and answer questions about them",
+      "fields": {
+        "config_entry": {
+          "name": "Config Entry",
+          "description": "The config entry to use for this service"
         },
-        "reauth_confirm": {
-          "title": "[%key:common::config_flow::title::reauth%]",
-          "description": "Your current API key: {api_key} is no longer valid. Please enter a new valid API key."
+        "model": {
+          "name": "Model",
+          "description": "The model",
+          "example": "gpt-4-vision-preview"
+        },
+        "prompt": {
+          "name": "Prompt",
+          "description": "The text to ask about image",
+          "example": "What’s in this image?"
+        },
+        "images": {
+          "name": "Images",
+          "description": "A list of images that would be asked",
+          "example": "{\"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg\"}"
+        },
+        "max_tokens": {
+          "name": "Max Tokens",
+          "description": "The maximum tokens",
+          "example": "300"
         }
-      },
-      "error": {
-        "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
-        "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
-        "unknown": "[%key:common::config_flow::error::unknown%]"
-      },
-      "abort": {
-        "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
-      }
-    },
-    "options": {
-      "step": {
-        "init": {
-          "data": {
-            "recommended": "Recommended model settings",
-            "prompt": "Instructions",
-            "chat_model": "[%key:common::generic::model%]",
-            "temperature": "Temperature",
-            "top_p": "Top P",
-            "top_k": "Top K",
-            "max_tokens": "Maximum tokens to return in response",
-            "llm_hass_api": "[%key:common::config_flow::data::llm_hass_api%]",
-            "max_function_calls_per_conversation": "Maximum function calls per conversation",
-            "functions": "Functions",
-            "use_tools": "Use Tools",
-            "harassment_block_threshold": "Negative or harmful comments targeting identity and/or protected attributes",
-            "hate_block_threshold": "Content that is rude, disrespectful, or profane",
-            "sexual_block_threshold": "Contains references to sexual acts or other lewd content",
-            "dangerous_block_threshold": "Promotes, facilitates, or encourages harmful acts"
-          },
-          "data_description": {
-            "prompt": "Instruct how the LLM should respond. This can be a template."
-          }
-        }
-      }
-    },
-    "services": {
-      "generate_content": {
-        "name": "Generate content",
-        "description": "Generate content from a prompt consisting of text and optionally images",
-        "fields": {
-          "prompt": {
-            "name": "Prompt",
-            "description": "The prompt",
-            "example": "Describe what you see in these images"
-          },
-          "image_filename": {
-            "name": "Image filename",
-            "description": "Deprecated. Use filenames instead.",
-            "example": "/config/www/image.jpg"
-          },
-          "filenames": {
-            "name": "Attachment filenames",
-            "description": "Attachments to add to the prompt (images, PDFs, etc)",
-            "example": "/config/www/image.jpg"
-          }
-        }
-      }
-    },
-    "issues": {
-      "deprecated_image_filename_parameter": {
-        "title": "Deprecated 'image_filename' parameter",
-        "description": "The 'image_filename' parameter in Google Generative AI actions is deprecated. Please edit scripts and automations to use 'filenames' intead."
       }
     }
   }
+}
