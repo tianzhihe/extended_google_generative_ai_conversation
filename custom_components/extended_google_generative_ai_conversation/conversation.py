@@ -19,6 +19,8 @@ from homeassistant.helpers import llm, intent
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import ulid
 
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
 from google.genai.errors import APIError
 from google.genai.types import (
     AutomaticFunctionCallingConfig,
