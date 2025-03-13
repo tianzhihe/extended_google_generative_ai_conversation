@@ -57,240 +57,335 @@ from .const import (
     RECOMMENDED_CHAT_MODEL,
     CONF_FUNCTIONS,
     DEFAULT_CONF_FUNCTIONS,
-    CONF_USE_TOOLS,
-    DEFAULT_USE_TOOLS,
-    MAX_TOOL_ITERATIONS,
-)
+    CONF_USE_TOOLS,"""The OpenAI Conversation integration."""
+from __future__ import annotations
 
+import json
+import logging
+from typing import Literal
+
+from openai import AsyncAzureOpenAI, AsyncOpenAI
+from openai._exceptions import AuthenticationError, OpenAIError
+from openai.types.chat.chat_completion import (
+    ChatCompletion,
+    ChatCompletionMessage,
+    Choice,
+)
+import yaml
+
+from homeassistant.components import conversation
+from homeassistant.components.homeassistant.exposed_entities import async_should_expose
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import ATTR_NAME, CONF_API_KEY, MATCH_ALL
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import (
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    TemplateError,
+)
+from homeassistant.helpers import (
+    config_validation as cv,
+    entity_registry as er,
+    intent,
+    template,
+)
+from homeassistant.helpers.httpx_client import get_async_client
+from homeassistant.helpers.typing import ConfigType
+
+# Tools for template handling, HTTP client handling, and unique ID generation (ulid).
+from homeassistant.util import ulid
+
+from .const import (
+    CONF_API_VERSION,
+    CONF_ATTACH_USERNAME,
+    CONF_BASE_URL,
+    CONF_CHAT_MODEL,
+    CONF_CONTEXT_THRESHOLD,
+    CONF_CONTEXT_TRUNCATE_STRATEGY,
+    CONF_FUNCTIONS,
+    CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+    CONF_MAX_TOKENS,
+    CONF_ORGANIZATION,
+    CONF_PROMPT,
+    CONF_SKIP_AUTHENTICATION,
+    CONF_TEMPERATURE,
+    CONF_TOP_P,
+    CONF_USE_TOOLS,
+    DEFAULT_ATTACH_USERNAME,
+    DEFAULT_CHAT_MODEL,
+    DEFAULT_CONF_FUNCTIONS,
+    DEFAULT_CONTEXT_THRESHOLD,
+    DEFAULT_CONTEXT_TRUNCATE_STRATEGY,
+    DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_PROMPT,
+    DEFAULT_SKIP_AUTHENTICATION,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    DEFAULT_USE_TOOLS,
+    DOMAIN,
+    EVENT_CONVERSATION_FINISHED,
+)
 from .exceptions import (
-    InvalidFunction,
-    FunctionNotFound,
     FunctionLoadFailed,
+    FunctionNotFound,
+    InvalidFunction,
     ParseArgumentsFailed,
     TokenLengthExceededError,
 )
+
+# Imports custom exceptions defined in the same integration’s package, describing various error conditions that can arise.
 from .helpers import (
     get_function_executor,
+    is_azure,
+    validate_authentication,
 )
-# You can remove or adapt these if desired
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
+# Defines a schema for the configuration, ensuring only config entries are used (and not YAML-based configuration).
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+# hass.data key for agent.
+# A string constant used as a key in the hass.data dictionary to store the conversation agent instance.
 DATA_AGENT = "agent"
 
-# You can decide if you still want a config schema
-def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up Google Generative AI Conversation integration (dummy setup)."""
+
+# The main setup function called when Home Assistant starts. 
+# It sets up related services (by calling async_setup_services) and returns True to confirm successful initialization.
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up OpenAI Conversation."""
+    await async_setup_services(hass, config)
     return True
 
-
+# Sets up this integration using a config entry (the typical way modern Home Assistant integrations load).
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Google Generative AI from a config entry with a new flow."""
-    agent = GoogleGenerativeAIAgent(hass, entry)
-    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[DATA_AGENT] = agent
+    """Set up OpenAI Conversation from a config entry."""
+
+    try:
+        await validate_authentication(
+            hass=hass,
+            api_key=entry.data[CONF_API_KEY],
+            base_url=entry.data.get(CONF_BASE_URL),
+            api_version=entry.data.get(CONF_API_VERSION),
+            organization=entry.data.get(CONF_ORGANIZATION),
+            skip_authentication=entry.data.get(
+                CONF_SKIP_AUTHENTICATION, DEFAULT_SKIP_AUTHENTICATION
+            ),
+        )
+    except AuthenticationError as err:
+        _LOGGER.error("Invalid API key: %s", err)
+        return False
+    except OpenAIError as err:
+        raise ConfigEntryNotReady(err) from err
+
+    # Creates an instance of the OpenAIAgent class, which handles all conversation logic.
+    agent = OpenAIAgent(hass, entry)
+
+    # Stores references to the newly created agent in hass.data so that other parts of Home Assistant can access it.
+    data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    data[CONF_API_KEY] = entry.data[CONF_API_KEY]
+    data[DATA_AGENT] = agent
+
+    # Sets this agent as the active conversation agent and returns True to confirm successful setup.
     conversation.async_set_agent(hass, entry, agent)
     return True
 
-
+# Unloads the integration, removing stored data and unsetting the conversation agent.
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload Google Generative AI conversation."""
-    hass.data[DOMAIN].pop(entry.entry_id, None)
+    """Unload OpenAI."""
+    hass.data[DOMAIN].pop(entry.entry_id)
     conversation.async_unset_agent(hass, entry)
     return True
 
+# Defines a custom conversation agent class that extends Home Assistant’s AbstractConversationAgent
+class OpenAIAgent(conversation.AbstractConversationAgent):
+    """OpenAI conversation agent."""
 
-# Keys we support for the schema of function parameters in Gemini
-SUPPORTED_SCHEMA_KEYS = {
-    "min_items",
-    "example",
-    "property_ordering",
-    "pattern",
-    "minimum",
-    "default",
-    "any_of",
-    "max_length",
-    "title",
-    "min_properties",
-    "min_length",
-    "max_items",
-    "maximum",
-    "nullable",
-    "max_properties",
-    "type",
-    "description",
-    "enum",
-    "format",
-    "items",
-    "properties",
-    "required",
-}
-
-def _camel_to_snake(name: str) -> str:
-    """Convert camel case to snake case."""
-    return "".join(["_" + c.lower() if c.isupper() else c for c in name]).lstrip("_")
-
-
-def _format_schema(schema: dict[str, Any]) -> Schema:
-    """Format the schema for Google Generative AI."""
-    if subschemas := schema.get("allOf"):
-        for subschema in subschemas:
-            if "type" in subschema:
-                return _format_schema(subschema)
-        return _format_schema(subschemas[0])
-
-    result = {}
-    for key, val in schema.items():
-        key = _camel_to_snake(key)
-        if key not in SUPPORTED_SCHEMA_KEYS:
-            continue
-        if key == "any_of":
-            val = [_format_schema(subschema) for subschema in val]
-        elif key == "type":
-            val = val.upper()
-        elif key == "format":
-            if schema.get("type") == "string" and val not in ("enum", "date-time"):
-                continue
-            if schema.get("type") == "number" and val not in ("float", "double"):
-                continue
-            if schema.get("type") == "integer" and val not in ("int32", "int64"):
-                continue
-            if schema.get("type") not in ("string", "number", "integer"):
-                continue
-        elif key == "items":
-            val = _format_schema(val)
-        elif key == "properties":
-            val = {k: _format_schema(v) for k, v in val.items()}
-        result[key] = val
-
-    if result.get("enum") and result.get("type") != "STRING":
-        # enum is only allowed for STRING type in Google Generative AI
-        result["type"] = "STRING"
-        result["enum"] = [str(item) for item in result["enum"]]
-
-    if result.get("type") == "OBJECT" and not result.get("properties"):
-        # Fallback to JSON string
-        result["properties"] = {"json": {"type": "STRING"}}
-        result["required"] = []
-    return cast(Schema, result)
-
-
-def _escape_decode(value: Any) -> Any:
-    """Recursively call codecs.escape_decode on all values."""
-    if isinstance(value, str):
-        return codecs.escape_decode(bytes(value, "utf-8"))[0].decode("utf-8")  # type: ignore[attr-defined]
-    if isinstance(value, list):
-        return [_escape_decode(item) for item in value]
-    if isinstance(value, dict):
-        return {k: _escape_decode(v) for k, v in value.items()}
-    return value
-
-
-def _format_tool(tool: llm.Tool) -> Tool:
-    """Format tool specification for Google Generative AI."""
-    parameters = None
-    if tool.parameters.schema:
-        parameters = _format_schema(tool.parameters.schema)
-    return Tool(
-        function_declarations=[
-            FunctionDeclaration(
-                name=tool.name,
-                description=tool.description,
-                parameters=parameters,
-            )
-        ]
-    )
-
-
-class GoogleGenerativeAIAgent(conversation.AbstractConversationAgent):
-    """
-    A Google Generative AI Agent, adopting the step-by-step function call structure
-    used in Code 2 (OpenAI Conversation).
-
-    This class manages conversation histories, function calls, and responses
-    for Google Generative AI (Gemini).
-    """
-
+    # Stores references to the Home Assistant instance, config entry, and a history dictionary that tracks conversation state by ID.
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Initialize the agent with a Google GenAI client."""
+        """Initialize the agent."""
         self.hass = hass
         self.entry = entry
-        self.history: dict[str, list[dict[str, Any]]] = {}
-        # The runtime_data should hold the Google Generative AI client.
-        # For example, entry.runtime_data = google.genai.Genie(...)
-        self._genai_client = entry.runtime_data
-        self.logger = LOGGER
+        self.history: dict[str, list[dict]] = {}
+        base_url = entry.data.get(CONF_BASE_URL)
 
+        # Depending on whether the URL is an Azure endpoint, 
+        # creates an appropriate OpenAI client (AsyncAzureOpenAI or AsyncOpenAI) for sending chat requests.
+        if is_azure(base_url):
+            self.client = AsyncAzureOpenAI(
+                api_key=entry.data[CONF_API_KEY],
+                azure_endpoint=base_url,
+                api_version=entry.data.get(CONF_API_VERSION),
+                organization=entry.data.get(CONF_ORGANIZATION),
+                http_client=get_async_client(hass),
+            )
+        else:
+            self.client = AsyncOpenAI(
+                api_key=entry.data[CONF_API_KEY],
+                base_url=base_url,
+                organization=entry.data.get(CONF_ORGANIZATION),
+                http_client=get_async_client(hass),
+            )
+
+    # Indicates this agent accepts messages in any language.
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
         """Return a list of supported languages."""
         return MATCH_ALL
 
+    # The core method that handles an incoming user message, determines a response, and returns it to Home Assistant.
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
-        """
-        Process user input in a conversation, adopting a structure like Code 2.
-        We keep a local history, determine if a function call is needed,
-        and respond accordingly.
-        """
-        # Obtain or create a conversation ID
+
+        # Gathers a list of entities that are marked as “exposed” for conversation control.
+        exposed_entities = self.get_exposed_entities()
+
+        # Checks if there is an existing conversation history. 
+        # If not, it creates a new conversation ID, generates a system message using the user’s custom prompt, 
+        # and handles errors (e.g., template rendering issues).
         if user_input.conversation_id in self.history:
             conversation_id = user_input.conversation_id
             messages = self.history[conversation_id]
         else:
             conversation_id = ulid.ulid()
             user_input.conversation_id = conversation_id
-
-            # Create a system message from the user config or default
-            prompt = self.entry.options.get(CONF_PROMPT, "")
-            if not prompt:
-                prompt = "You are a helpful assistant."
-            system_message = {"role": "system", "content": prompt}
+            try:
+                system_message = self._generate_system_message(
+                    exposed_entities, user_input
+                )
+            except TemplateError as err:
+                _LOGGER.error("Error rendering prompt: %s", err)
+                intent_response = intent.IntentResponse(language=user_input.language)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    f"Sorry, I had a problem with my template: {err}",
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
             messages = [system_message]
 
-        # Append user message
-        messages.append({"role": "user", "content": user_input.text})
+        # Prepares the user’s message payload with the text input.
+        user_message = {"role": "user", "content": user_input.text}
+        
+        # Optionally attaches the user’s ID if configured.
+        if self.entry.options.get(CONF_ATTACH_USERNAME, DEFAULT_ATTACH_USERNAME):
+            user = user_input.context.user_id
+            if user is not None:
+                user_message[ATTR_NAME] = user
 
-        # Start the query cycle
+        # Adds the user message to the conversation’s message list.
+        messages.append(user_message)
+
+        # Calls the query method to get a response from OpenAI. 
         try:
-            response_data = await self.query(messages, user_input, 0)
-        except (APIError, ValueError) as err:
-            _LOGGER.error("Error talking to Google Generative AI: %s", err)
+            query_response = await self.query(user_input, messages, exposed_entities, 0)
+        #  Catches errors from the OpenAI library or Home Assistant. 
+        except OpenAIError as err:
+            _LOGGER.error(err)
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
-                f"Problem with Google Generative AI: {err}",
+                f"Sorry, I had a problem talking to OpenAI: {err}",
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
+        # If something goes wrong, it builds an error response.
         except HomeAssistantError as err:
-            _LOGGER.error("Error: %s", err)
+            _LOGGER.error(err, exc_info=err)
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN, str(err)
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Something went wrong: {err}",
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
 
-        # Store the assistant message in the conversation
-        messages.append(response_data["assistant_message"])
+        # Stores the response message in the conversation history.
+        messages.append(query_response.message.model_dump(exclude_none=True))
         self.history[conversation_id] = messages
 
-        # Construct final Home Assistant conversation result
+        # Fires an event so that other parts of the system can track when a conversation finishes.
+        self.hass.bus.async_fire(
+            EVENT_CONVERSATION_FINISHED,
+            {
+                "response": query_response.response.model_dump(),
+                "user_input": user_input,
+                "messages": messages,
+            },
+        )
+
+        # Constructs the final response object for Home Assistant to relay back to the user.
         intent_response = intent.IntentResponse(language=user_input.language)
-        intent_response.async_set_speech(response_data["assistant_message"]["content"])
+        intent_response.async_set_speech(query_response.message.content)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
 
-    def get_functions(self) -> list[dict[str, Any]]:
-        """
-        Load user-defined functions from YAML or defaults. We keep them in
-        a format suitable for Gemini, but we do not rely on the old approach
-        from the original code. We only parse them for usage in the new flow.
-        """
+    # Retrieves the prompt template from the integration’s options or defaults, 
+    # then returns a system message that instructs the model.
+    def _generate_system_message(
+        self, exposed_entities, user_input: conversation.ConversationInput
+    ):
+        raw_prompt = self.entry.options.get(CONF_PROMPT, DEFAULT_PROMPT)
+        prompt = self._async_generate_prompt(raw_prompt, exposed_entities, user_input)
+        return {"role": "system", "content": prompt}
+
+    # Renders the template with placeholders replaced by actual entity information, device ID, etc.
+    def _async_generate_prompt(
+        self,
+        raw_prompt: str,
+        exposed_entities,
+        user_input: conversation.ConversationInput,
+    ) -> str:
+        """Generate a prompt for the user."""
+        return template.Template(raw_prompt, self.hass).async_render(
+            {
+                "ha_name": self.hass.config.location_name,
+                "exposed_entities": exposed_entities,
+                "current_device_id": user_input.device_id,
+            },
+            parse_result=False,
+        )
+
+    # Collects all entities that should be exposed for voice control, 
+    # including their aliases and current state, and returns them as a list.
+    def get_exposed_entities(self):
+        states = [
+            state
+            for state in self.hass.states.async_all()
+            if async_should_expose(self.hass, conversation.DOMAIN, state.entity_id)
+        ]
+        entity_registry = er.async_get(self.hass)
+        exposed_entities = []
+        for state in states:
+            entity_id = state.entity_id
+            entity = entity_registry.async_get(entity_id)
+
+            aliases = []
+            if entity and entity.aliases:
+                aliases = entity.aliases
+
+            exposed_entities.append(
+                {
+                    "entity_id": entity_id,
+                    "name": state.name,
+                    "state": self.hass.states.get(entity_id).state,
+                    "aliases": aliases,
+                }
+            )
+        return exposed_entities
+
+    # Loads a list of function definitions from YAML or uses defaults. 
+    # Passes each definition to a function executor helper that refines or converts the data. 
+    # Handles any errors by raising custom exceptions.
+    def get_functions(self):
         try:
             function = self.entry.options.get(CONF_FUNCTIONS)
             result = yaml.safe_load(function) if function else DEFAULT_CONF_FUNCTIONS
@@ -303,192 +398,242 @@ class GoogleGenerativeAIAgent(conversation.AbstractConversationAgent):
                         setting["function"]
                     )
             return result
-        except (InvalidFunction, FunctionNotFound) as exc:
-            raise exc
-        except Exception as exc:
-            raise FunctionLoadFailed from exc
+        except (InvalidFunction, FunctionNotFound) as e:
+            raise e
+        except:
+            raise FunctionLoadFailed()
 
+    # Depending on configuration, clears old messages from the conversation to prevent excessively large contexts. 
+    # Also regenerates the system prompt if everything got cleared.
+    async def truncate_message_history(
+        self, messages, exposed_entities, user_input: conversation.ConversationInput
+    ):
+        """Truncate message history."""
+        strategy = self.entry.options.get(
+            CONF_CONTEXT_TRUNCATE_STRATEGY, DEFAULT_CONTEXT_TRUNCATE_STRATEGY
+        )
+
+        if strategy == "clear":
+            last_user_message_index = None
+            for i in reversed(range(len(messages))):
+                if messages[i]["role"] == "user":
+                    last_user_message_index = i
+                    break
+
+            if last_user_message_index is not None:
+                del messages[1:last_user_message_index]
+                # refresh system prompt when all messages are deleted
+                messages[0] = self._generate_system_message(
+                    exposed_entities, user_input
+                )
+
+    # Gathers user-selected or default configuration for the OpenAI chat call (model, max tokens, temperature, etc.). 
+    # Determines how many function calls are allowed and if more calls should be blocked.
     async def query(
         self,
-        messages: list[dict[str, Any]],
         user_input: conversation.ConversationInput,
-        iteration: int,
-    ) -> dict[str, Any]:
-        """
-        Core method that sends messages to the Google Generative AI service
-        and manages function call logic, similar to Code 2's approach.
-        """
-        # Prepare the request config
-        model_name = self.entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
-        generateContentConfig = GenerateContentConfig(
-            temperature=self.entry.options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
-            top_k=self.entry.options.get(CONF_TOP_K, RECOMMENDED_TOP_K),
-            top_p=self.entry.options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
-            max_output_tokens=self.entry.options.get(
-                CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
-            ),
-            safety_settings=[
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=self.entry.options.get(
-                        CONF_HATE_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD
-                    ),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=self.entry.options.get(
-                        CONF_HARASSMENT_BLOCK_THRESHOLD,
-                        RECOMMENDED_HARM_BLOCK_THRESHOLD,
-                    ),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=self.entry.options.get(
-                        CONF_DANGEROUS_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD
-                    ),
-                ),
-                SafetySetting(
-                    category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=self.entry.options.get(
-                        CONF_SEXUAL_BLOCK_THRESHOLD, RECOMMENDED_HARM_BLOCK_THRESHOLD
-                    ),
-                ),
-            ],
-            automatic_function_calling=AutomaticFunctionCallingConfig(
-                disable=True, maximum_remote_calls=None
-            ),
+        messages,
+        exposed_entities,
+        n_requests,
+    ) -> OpenAIQueryResponse:
+        """Process a sentence."""
+        model = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
+        max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+        top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
+        temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
+        use_tools = self.entry.options.get(CONF_USE_TOOLS, DEFAULT_USE_TOOLS)
+        context_threshold = self.entry.options.get(
+            CONF_CONTEXT_THRESHOLD, DEFAULT_CONTEXT_THRESHOLD
         )
+        
+        # Get all the functions from the user configuration of functions
+        functions = list(map(lambda s: s["spec"], self.get_functions()))
+        function_call = "auto"
+        if n_requests == self.entry.options.get(
+            CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+            DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+        ):
+            function_call = "none"
 
-        # Convert local text-based messages into Gemini Contents
-        gemini_messages = self._convert_messages_to_gemini(messages)
-        chat = self._genai_client.aio.chats.create(
-            model=model_name, history=gemini_messages, config=generateContentConfig
-        )
-
-        # Attempt to get a response
-        for _ in range(MAX_TOOL_ITERATIONS):
-            chat_response = await chat.send_message(message="")  # We'll send no new text
-            candidate = chat_response.candidates[0]
-            parts = candidate.content.parts
-
-            # If the LLM returns blocked content
-            if chat_response.prompt_feedback:
-                block_msg = chat_response.prompt_feedback.block_reason_message
-                raise HomeAssistantError(f"Content blocked: {block_msg}")
-
-            # Combine text from parts
-            assistant_text = " ".join([p.text for p in parts if p.text])
-
-            # Check for function calls
-            function_calls = [
-                p.function_call for p in parts if p.function_call is not None
-            ]
-            if not function_calls:
-                # No function call needed. Return final text to user.
-                return {
-                    "assistant_message": {
-                        "role": "assistant",
-                        "content": assistant_text,
-                    }
-                }
-
-            # If there's a function call, handle it
-            response_data = await self.execute_function_calls(
-                function_calls, assistant_text, messages, user_input
-            )
-            if response_data.get("done"):
-                return {
-                    "assistant_message": {
-                        "role": "assistant",
-                        "content": response_data["assistant_content"],
-                    }
-                }
-            # If not done, the loop continues to allow new calls
-        # If we exceed MAX_TOOL_ITERATIONS, return what we have
-        return {
-            "assistant_message": {
-                "role": "assistant",
-                "content": "I'm stuck in a loop; can't finish.",
+        # Prepares additional parameters for function/tool usage if enabled, or clears them if there are no functions.
+        tool_kwargs = {"functions": functions, "function_call": function_call}
+        if use_tools:
+            tool_kwargs = {
+                "tools": [{"type": "function", "function": func} for func in functions],
+                "tool_choice": function_call,
             }
-        }
 
-    async def execute_function_calls(
+        if len(functions) == 0:
+            tool_kwargs = {}
+
+        # Logs the messages being sent for debugging.
+        _LOGGER.info("Prompt for %s: %s", model, json.dumps(messages))
+
+        # Makes the asynchronous call to the OpenAI API, sending messages and function/tool definitions.
+        response: ChatCompletion = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            user=user_input.conversation_id,
+            **tool_kwargs,
+        )
+
+        # Logs the raw response for debugging purposes.
+        _LOGGER.info("Response %s", json.dumps(response.model_dump(exclude_none=True)))
+
+        # Checks if the total token usage exceeded a threshold and, if so, calls the truncation method.
+        if response.usage.total_tokens > context_threshold:
+            await self.truncate_message_history(messages, exposed_entities, user_input)
+
+        # Extracts the main choice from the OpenAI completion response.
+        choice: Choice = response.choices[0]
+        message = choice.message
+
+        # If OpenAI indicates a function/tool call is needed, the relevant helper method is called.
+        if choice.finish_reason == "function_call":
+            return await self.execute_function_call(
+                user_input, messages, message, exposed_entities, n_requests + 1
+            )
+        if choice.finish_reason == "tool_calls":
+            return await self.execute_tool_calls(
+                user_input, messages, message, exposed_entities, n_requests + 1
+            )
+
+        #  If tokens exceeded the maximum length, a custom exception is raised.
+        if choice.finish_reason == "length":
+            raise TokenLengthExceededError(response.usage.completion_tokens)
+
+        return OpenAIQueryResponse(response=response, message=message)
+
+    # Looks up the requested function by name. 
+    # If not found, raises an error. 
+    # Otherwise, proceeds to execute the function.
+    async def execute_function_call(
         self,
-        function_calls: list[FunctionCall],
-        assistant_text: str,
-        messages: list[dict[str, Any]],
         user_input: conversation.ConversationInput,
-    ) -> dict[str, Any]:
-        """
-        Execute each function call indicated by the LLM, append results,
-        and signal if we are done or need to continue calling the LLM.
-        """
-        functions_config = self.get_functions()
-        # If no functions are available, we do nothing
-        if not functions_config:
-            return {"done": True, "assistant_content": assistant_text}
+        messages,
+        message: ChatCompletionMessage,
+        exposed_entities,
+        n_requests,
+    ) -> OpenAIQueryResponse:
+        function_name = message.function_call.name
+        function = next(
+            (s for s in self.get_functions() if s["spec"]["name"] == function_name),
+            None,
+        )
+        if function is not None:
+            return await self.execute_function(
+                user_input,
+                messages,
+                message,
+                exposed_entities,
+                n_requests,
+                function,
+            )
+        raise FunctionNotFound(function_name)
 
-        # We'll store any new function results as "function" messages
-        for fn_call in function_calls:
-            function_name = fn_call.name
-            # Try to find a matching function
-            function_data = next(
-                (
-                    f
-                    for f in functions_config
-                    if f["spec"]["name"] == function_name
-                ),
+    # Fetches the executor for the specified function type. 
+    # Attempts to parse JSON arguments passed by OpenAI; raises a parsing error if invalid JSON.
+    async def execute_function(
+        self,
+        user_input: conversation.ConversationInput,
+        messages,
+        message: ChatCompletionMessage,
+        exposed_entities,
+        n_requests,
+        function,
+    ) -> OpenAIQueryResponse:
+        function_executor = get_function_executor(function["function"]["type"])
+
+        try:
+            arguments = json.loads(message.function_call.arguments)
+        except json.decoder.JSONDecodeError as err:
+            raise ParseArgumentsFailed(message.function_call.arguments) from err
+
+
+        # Executes the function with given arguments, appends its result as a new message, 
+        # then calls query again to let OpenAI handle the updated context.
+        result = await function_executor.execute(
+            self.hass, function["function"], arguments, user_input, exposed_entities
+        )
+
+        messages.append(
+            {
+                "role": "function",
+                "name": message.function_call.name,
+                "content": str(result),
+            }
+        )
+        return await self.query(user_input, messages, exposed_entities, n_requests)
+
+    # Processes each tool call in the message. 
+    # Similar to function calls, it executes them and appends results to the conversation.
+    async def execute_tool_calls(
+        self,
+        user_input: conversation.ConversationInput,
+        messages,
+        message: ChatCompletionMessage,
+        exposed_entities,
+        n_requests,
+    ) -> OpenAIQueryResponse:
+        messages.append(message.model_dump(exclude_none=True))
+        for tool in message.tool_calls:
+            function_name = tool.function.name
+            function = next(
+                (s for s in self.get_functions() if s["spec"]["name"] == function_name),
                 None,
             )
-            if not function_data:
-                raise FunctionNotFound(function_name)
-
-            # Attempt to parse arguments
-            try:
-                arguments = json.loads(_escape_decode(fn_call.args))
-            except json.JSONDecodeError as exc:
-                raise ParseArgumentsFailed(fn_call.args) from exc
-
-            # Execute
-            function_executor = get_function_executor(function_data["function"]["type"])
-            result = await function_executor.execute(
-                self.hass, function_data["function"], arguments, user_input, None
-            )
-
-            # Append a "function" role message
-            messages.append(
-                {
-                    "role": "function",
-                    "name": function_name,
-                    "content": str(result),
-                }
-            )
-
-        # After executing all function calls, we return a signal that the conversation
-        # should continue. The query loop will re-issue messages to see if more calls are needed.
-        return {"done": False, "assistant_content": assistant_text}
-
-    def _convert_messages_to_gemini(self, messages: list[dict[str, Any]]) -> list[Content]:
-        """
-        Convert local conversation messages into the Google Generative AI
-        Content objects. For system/user/assistant roles, we adopt the same
-        approach as Code 2 but for Gemini.
-        """
-        gemini_messages: list[Content] = []
-        for msg in messages:
-            role = msg["role"]
-            text = msg.get("content", "")
-
-            # 'assistant' or 'system' roles become 'model' or 'system' in Gemini
-            if role == "assistant":
-                gemini_role = "model"
-            else:
-                gemini_role = role
-
-            gemini_messages.append(
-                Content(
-                    role=gemini_role,
-                    parts=[Part.from_text(text=text)],
+            if function is not None:
+                result = await self.execute_tool_function(
+                    user_input,
+                    tool,
+                    exposed_entities,
+                    function,
                 )
-            )
-        return gemini_messages
+
+                messages.append(
+                    {
+                        "tool_call_id": tool.id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": str(result),
+                    }
+                )
+            else:
+                raise FunctionNotFound(function_name)
+        return await self.query(user_input, messages, exposed_entities, n_requests)
+
+    # Deserializes the tool’s JSON arguments and runs the corresponding function. 
+    # Returns the result to be added to the messages.
+    async def execute_tool_function(
+        self,
+        user_input: conversation.ConversationInput,
+        tool,
+        exposed_entities,
+        function,
+    ) -> OpenAIQueryResponse:
+        function_executor = get_function_executor(function["function"]["type"])
+
+        try:
+            arguments = json.loads(tool.function.arguments)
+        except json.decoder.JSONDecodeError as err:
+            raise ParseArgumentsFailed(tool.function.arguments) from err
+
+        result = await function_executor.execute(
+            self.hass, function["function"], arguments, user_input, exposed_entities
+        )
+        return result
+
+# A helper class for bundling the response and message together.
+class OpenAIQueryResponse:
+    """OpenAI query response value object."""
+
+    # Stores the original ChatCompletion object and the final message returned by OpenAI.
+    def __init__(
+        self, response: ChatCompletion, message: ChatCompletionMessage
+    ) -> None:
+        """Initialize OpenAI query response value object."""
+        self.response = response
+        self.message = message
