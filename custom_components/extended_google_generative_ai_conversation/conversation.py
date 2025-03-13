@@ -314,7 +314,7 @@ class GoogleGenerativeAIConversationAgent(conversation.AbstractConversationAgent
 
         # Generate Gemini-compatible contents
         contents = [
-            Content(role=msg["role"], parts=[Part.from_text(msg["content"])]
+            Content(role=msg["role"], parts=[Part.from_text(msg["content"]))
             for msg in messages if msg["role"] in ("user", "system")
         ]
 
