@@ -305,6 +305,30 @@ class GoogleGenerativeAIConversationEntity(
         """Return a list of supported languages."""
         return MATCH_ALL
 
+    # Loads a list of function definitions from YAML or uses defaults. 
+    # Passes each definition to a function executor helper that refines or converts the data. 
+    # Handles any errors by raising custom exceptions.
+    def get_functions(self):
+        try:
+            function = self.entry.options.get(CONF_FUNCTIONS)
+            result = yaml.safe_load(function) if function else DEFAULT_CONF_FUNCTIONS
+            if result:
+                for setting in result:
+                    function_executor = get_function_executor(
+                        setting["function"]["type"]
+                    )
+                    setting["function"] = function_executor.to_arguments(
+                        setting["function"]
+                    )
+            return result
+        except (InvalidFunction, FunctionNotFound) as e:
+            raise e
+        except:
+            raise FunctionLoadFailed()
+
+    # Get all the functions from the user configuration of functions
+    functions = list(map(lambda s: s["spec"], self.get_functions()))
+
     #  Called when Home Assistant has added this entity to the system.
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -371,6 +395,9 @@ class GoogleGenerativeAIConversationEntity(
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
                 for tool in chat_log.llm_api.tools
             ]
+
+        # Add the functions to the tools list
+        tools.extend(functions)
 
         # Chooses which model to use (user-chosen or recommended).
         model_name = self.entry.options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
